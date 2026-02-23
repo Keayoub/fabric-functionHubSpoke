@@ -13,7 +13,7 @@ import json
 import time
 
 import azure.functions as func
-from azure.identity import ManagedIdentityCredential
+from azure.identity import ManagedIdentityCredential, DefaultAzureCredential
 from azure.keyvault.secrets import SecretClient
 from msal import ConfidentialClientApplication
 import jwt
@@ -23,15 +23,20 @@ import requests as http_req
 logger = logging.getLogger(__name__)
 
 # ─── ENV VARS ──────────────────────────────────────────────────────
-TENANT_ID               = os.environ["ENTRA_TENANT_ID"]
-FUNC_APP_CLIENT_ID      = os.environ["FUNC_APP_CLIENT_ID"]
-KEY_VAULT_URL           = os.environ["KEY_VAULT_URL"]
-SP_CLIENT_ID_SECRET     = os.environ["SP_CLIENT_ID_SECRET_NAME"]       # e.g. "sp-client-id"
-SP_CLIENT_SECRET_NAME   = os.environ["SP_CLIENT_SECRET_NAME"]          # e.g. "sp-client-secret"
-SP_TENANT_SECRET        = os.environ.get("SP_TENANT_ID_SECRET_NAME")
-ALLOWED_MSI_SECRET      = os.environ.get(                              # e.g. "allowed-msi-oids"
-    "ALLOWED_MSI_OIDS_SECRET_NAME", "allowed-msi-oids"
-)
+def _get_env_var(key, default=None):
+    """Get environment variable with fallback and logging."""
+    value = os.environ.get(key, default)
+    if value is None:
+        logger.warning(f"Environment variable '{key}' not found")
+    return value
+
+TENANT_ID               = _get_env_var("ENTRA_TENANT_ID", "")
+FUNC_APP_CLIENT_ID      = _get_env_var("FUNC_APP_CLIENT_ID", "")
+KEY_VAULT_URL           = _get_env_var("KEY_VAULT_URL", "")
+SP_CLIENT_ID_SECRET     = _get_env_var("SP_CLIENT_ID_SECRET_NAME", "sp-client-id")
+SP_CLIENT_SECRET_NAME   = _get_env_var("SP_CLIENT_SECRET_NAME", "sp-client-secret")
+SP_TENANT_SECRET        = _get_env_var("SP_TENANT_ID_SECRET_NAME", "sp-tenant-id")
+ALLOWED_MSI_SECRET      = _get_env_var("ALLOWED_MSI_OIDS_SECRET_NAME", "allowed-msi-oids")
 # ───────────────────────────────────────────────────────────────────
 
 JWKS_URI  = f"https://login.microsoftonline.com/{TENANT_ID}/discovery/v2.0/keys"
@@ -176,10 +181,21 @@ def resolve_caller(claims: dict) -> dict:
 # ══════════════════════════════════════════════════════════════════
 
 def _get_kv_client() -> SecretClient:
-    """Return a Key Vault client using Function Managed Identity."""
+    """Return a Key Vault client using appropriate credentials."""
+    # In local development: use DefaultAzureCredential (which tries CLI, env vars, etc.)
+    # In Azure: use ManagedIdentityCredential
+    is_local_dev = not os.environ.get("WEBSITE_INSTANCE_ID")
+    
+    if is_local_dev:
+        logger.info("Using DefaultAzureCredential for local development")
+        credential = DefaultAzureCredential()
+    else:
+        logger.info("Using ManagedIdentityCredential for Azure")
+        credential = ManagedIdentityCredential()
+    
     return SecretClient(
         vault_url=KEY_VAULT_URL,
-        credential=ManagedIdentityCredential()
+        credential=credential
     )
 
 
@@ -292,6 +308,16 @@ def get_sp_token(
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 
 
+@app.route(route="health", methods=["GET"])
+def health_check(req: func.HttpRequest) -> func.HttpResponse:
+    """Health check endpoint."""
+    return func.HttpResponse(
+        json.dumps({"status": "ok", "message": "Azure Function is running"}),
+        status_code=200,
+        mimetype="application/json"
+    )
+
+
 @app.route(route="GetSPToken", methods=["POST"])
 def get_sp_token_handler(req: func.HttpRequest) -> func.HttpResponse:
     """
@@ -318,15 +344,32 @@ def get_sp_token_handler(req: func.HttpRequest) -> func.HttpResponse:
     """
     logger.info("GetSPToken triggered")
 
-    # ── Step 1: Validate JWT ──────────────────────────────────────
-    try:
-        claims = validate_token(req.headers.get("Authorization", ""))
-    except (ValueError, Exception) as e:
-        logger.warning("Token validation failed: %s", e)
-        return _error(401, "unauthorized", str(e))
+    # ── Step 1: Validate JWT (skip in local development) ──────────
+    # Check if running locally (no WEBSITE_INSTANCE_ID = local, set = Azure App Service)
+    is_local_dev = not os.environ.get("WEBSITE_INSTANCE_ID")
+    
+    if is_local_dev:
+        logger.info("LOCAL DEV MODE: Skipping JWT validation")
+        # For local testing, create a minimal caller object
+        caller = {
+            "type": "USER",
+            "oid": "local-test-user",
+            "display": "local-dev@test.com",
+            "upn": "local-dev@test.com",
+            "appid": None,
+            "is_pipeline": False,
+            "tid": TENANT_ID,
+        }
+    else:
+        # Production: validate JWT
+        try:
+            claims = validate_token(req.headers.get("Authorization", ""))
+        except (ValueError, Exception) as e:
+            logger.warning("Token validation failed: %s", e)
+            return _error(401, "unauthorized", str(e))
 
-    # ── Step 2: Resolve caller identity ──────────────────────────
-    caller = resolve_caller(claims)
+        # ── Step 2: Resolve caller identity ──────────────────────────
+        caller = resolve_caller(claims)
 
     # ── Step 3: KV client (single connection reused for both authz + creds) ──
     try:
@@ -335,14 +378,15 @@ def get_sp_token_handler(req: func.HttpRequest) -> func.HttpResponse:
         logger.error("KV client init failed: %s", e)
         return _error(500, "keyvault_error", str(e))
 
-    # ── Step 4: Authorize the caller ─────────────────────────────
-    try:
-        authorize_caller(caller, kv)
-    except PermissionError as e:
-        return _error(403, "forbidden", str(e))
-    except Exception as e:
-        logger.error("Authorization error: %s", e)
-        return _error(500, "authorization_error", str(e))
+    # ── Step 4: Authorize the caller (skip in local dev) ────────────
+    if not is_local_dev:
+        try:
+            authorize_caller(caller, kv)
+        except PermissionError as e:
+            return _error(403, "forbidden", str(e))
+        except Exception as e:
+            logger.error("Authorization error: %s", e)
+            return _error(500, "authorization_error", str(e))
 
     # ── Step 5: Parse target scope from body ──────────────────────
     try:
