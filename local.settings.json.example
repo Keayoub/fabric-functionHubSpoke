@@ -1,0 +1,17 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "AzureWebJobsFeatureFlags": "EnableWorkerIndexing",
+    
+    "ENTRA_TENANT_ID": "your-tenant-id-here",
+    "FUNC_APP_CLIENT_ID": "your-function-app-client-id-here",
+    "KEY_VAULT_URL": "https://your-keyvault.vault.azure.net/",
+    
+    "SP_CLIENT_ID_SECRET_NAME": "sp-client-id",
+    "SP_CLIENT_SECRET_NAME": "sp-client-secret",
+    "SP_TENANT_ID_SECRET_NAME": "sp-tenant-id",
+    "ALLOWED_MSI_OIDS_SECRET_NAME": "allowed-msi-oids"
+  }
+}

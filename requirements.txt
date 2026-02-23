@@ -1,0 +1,14 @@
+# Azure Functions
+azure-functions>=1.18.0
+
+# Azure Identity & Key Vault
+azure-identity>=1.15.0
+azure-keyvault-secrets>=4.7.0
+
+# Authentication & JWT
+PyJWT>=2.8.0
+cryptography>=41.0.0
+msal>=1.26.0
+
+# HTTP
+requests>=2.31.0
