@@ -31,17 +31,21 @@ Workspace           Workspace
 
 ```
 fabric-functionHubSpoke/
-├── function_app.py          # Main Function App (Python v2 model)
-├── host.json                # Function host configuration
-├── requirements.txt         # Python dependencies
-├── local.settings.json      # Local development settings (gitignored)
-├── .funcignore             # Files excluded from deployment
-├── .gitignore              # Git exclusions
+├── function_app.py                    # Main Function App (Python v2 model)
+├── host.json                          # Function host configuration
+├── requirements.txt                   # Python dependencies
+├── local.settings.json.example        # Template for local development settings
+├── deploy.ps1                         # Deployment script for Azure
 │
-├── keyvault_setup.py       # Script to bootstrap Key Vault secrets
-├── fabric_notebook_v2.py   # Client code for Fabric notebooks
-├── azure_function_v2.py    # Reference implementation (v1 model)
-└── fabric_hub_spoke_v2.html # Architecture documentation
+├── scripts/
+│   └── setup_sp_keyvault.ps1         # Script to bootstrap Key Vault secrets
+│
+├── samples/
+│   ├── call_function_sample.ipynb    # Example notebook calling the function
+│   └── test_function.ipynb           # Testing notebook
+│
+├── README.md                          # This file
+└── requirements.txt                  # Python dependencies
 ```
 
 ## 🚀 Deployment
@@ -144,17 +148,11 @@ az role assignment create `
 
 ### Step 5: Bootstrap Key Vault Secrets
 
-Edit `keyvault_setup.py` with your values and run:
+Edit `scripts/setup_sp_keyvault.ps1` with your values and run:
 
 ```powershell
-# Activate virtual environment
-.\.venv\Scripts\Activate.ps1
-
-# Install dependencies
-pip install azure-identity azure-keyvault-secrets
-
-# Run setup script
-python keyvault_setup.py
+# From the fabric-functionHubSpoke directory
+powershell -ExecutionPolicy Bypass -File scripts/setup_sp_keyvault.ps1
 ```
 
 ### Step 6: Deploy Function App
@@ -166,30 +164,35 @@ func azure functionapp publish $FUNCTION_APP
 
 ## 🧪 Local Testing
 
-```powershell
-# Install dependencies
-pip install -r requirements.txt
+1. **Create local settings file**:
+   ```powershell
+   Copy-Item local.settings.json.example local.settings.json
+   # Edit local.settings.json with your local values
+   ```
 
-# Update local.settings.json with your values
+2. **Install dependencies**:
+   ```powershell
+   pip install -r requirements.txt
+   ```
 
-# Start local Function runtime
-func start
-```
+3. **Start local Function runtime**:
+   ```powershell
+   func start
+   ```
 
-Test the endpoint:
-
-```powershell
-$TOKEN = "<get-fabric-user-token-for-api://your-function-app-id>"
-
-curl -X POST http://localhost:7071/api/GetSPToken `
-  -H "Authorization: Bearer $TOKEN" `
-  -H "Content-Type: application/json" `
-  -d '{"targetScope": "https://management.azure.com/.default"}'
-```
+4. **Test the endpoint** using the example in [samples/test_function.ipynb](samples/test_function.ipynb) or with curl:
+   ```powershell
+   $TOKEN = "<your-bearer-token>"
+   
+   curl -X POST http://localhost:7071/api/GetSPToken `
+     -H "Authorization: Bearer $TOKEN" `
+     -H "Content-Type: application/json" `
+     -d '{"targetScope": "https://management.azure.com/.default"}'
+   ```
 
 ## 📝 Usage in Fabric Notebooks
 
-See [fabric_notebook_v2.py](fabric_notebook_v2.py) for complete example:
+See [samples/call_function_sample.ipynb](samples/call_function_sample.ipynb) for a complete example:
 
 ```python
 from notebookutils import mssparkutils
@@ -198,10 +201,10 @@ import requests
 FUNC_APP_CLIENT_ID = "your-function-app-client-id"
 FUNCTION_URL = "https://func-fabric-token-broker.azurewebsites.net/api/GetSPToken"
 
-# Get token for Function
+# Get token for Function using Fabric's managed identity
 token = mssparkutils.credentials.getToken(f"api://{FUNC_APP_CLIENT_ID}")
 
-# Call Function
+# Call Function to get Service Principal token
 response = requests.post(
     FUNCTION_URL,
     headers={"Authorization": f"Bearer {token}"},
