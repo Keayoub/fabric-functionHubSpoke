@@ -48,7 +48,7 @@ AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}"
 # ── Module-level caches (survive warm Function instances) ──────────
 _jwks_cache: dict = {}  # {"keys": [...], "fetched_at": float}
 _JWKS_TTL_SECONDS: int = 3600  # refresh JWKS every hour
-_msal_app: object = None  # ConfidentialClientApplication singleton
+_msal_apps: dict = {}  # { sp_client_id: ConfidentialClientApplication } — one per SP
 # ───────────────────────────────────────────────────────────────────
 
 # ══════════════════════════════════════════════════════════════════
@@ -255,36 +255,57 @@ def authorize_caller(caller: dict, kv: SecretClient) -> None:
 # ══════════════════════════════════════════════════════════════════
 # SECTION 5 — KEY VAULT: SP CREDENTIALS
 # ══════════════════════════════════════════════════════════════════
-def get_sp_creds(kv: SecretClient) -> tuple[str, str, str]:
+def get_sp_creds(kv: SecretClient, sp_name: Optional[str] = None) -> tuple[str, str, str]:
     """
     Fetch SP credentials from Key Vault using Function Managed Identity.
     Returns (sp_client_id, sp_client_secret, sp_tenant_id).
+
+    If sp_name is provided, secrets are resolved by convention:
+        {sp_name}-client-id      → client ID
+        {sp_name}-client-secret  → client secret
+        {sp_name}-tenant-id      → tenant (optional, falls back to ENTRA_TENANT_ID)
+
+    If sp_name is omitted, falls back to env-var-configured secret names
+    (SP_CLIENT_ID_SECRET_NAME, SP_CLIENT_SECRET_NAME, SP_TENANT_ID_SECRET_NAME).
     """
+    if sp_name:
+        client_id_secret_name: str = f"{sp_name}-client-id"
+        client_secret_secret_name: str = f"{sp_name}-client-secret"
+        tenant_secret_name: str = f"{sp_name}-tenant-id"
+    else:
+        client_id_secret_name = SP_CLIENT_ID_SECRET or "sp-client-id"
+        client_secret_secret_name = SP_CLIENT_SECRET_NAME or "sp-client-secret"
+        tenant_secret_name = SP_TENANT_SECRET or "sp-tenant-id"
+
     try:
-        sp_id_secret = kv.get_secret(SP_CLIENT_ID_SECRET)
+        sp_id_secret = kv.get_secret(client_id_secret_name)
         if not sp_id_secret or not sp_id_secret.value:
-            raise ValueError(f"SP_CLIENT_ID secret '{SP_CLIENT_ID_SECRET}' is empty")
+            raise ValueError(f"SP client-id secret '{client_id_secret_name}' is empty")
         sp_id = sp_id_secret.value
     except Exception as e:
-        logger.error("Failed to fetch SP_CLIENT_ID from KV: %s", e)
+        logger.error("Failed to fetch SP client-id from KV (secret=%s): %s", client_id_secret_name, e)
         raise
-    
+
     try:
-        sp_secret_secret = kv.get_secret(SP_CLIENT_SECRET_NAME)
+        sp_secret_secret = kv.get_secret(client_secret_secret_name)
         if not sp_secret_secret or not sp_secret_secret.value:
-            raise ValueError(f"SP_CLIENT_SECRET secret '{SP_CLIENT_SECRET_NAME}' is empty")
+            raise ValueError(f"SP client-secret secret '{client_secret_secret_name}' is empty")
         sp_secret = sp_secret_secret.value
     except Exception as e:
-        logger.error("Failed to fetch SP_CLIENT_SECRET from KV: %s", e)
+        logger.error("Failed to fetch SP client-secret from KV (secret=%s): %s", client_secret_secret_name, e)
         raise
-    
-    try:
-        sp_tid_secret = kv.get_secret(SP_TENANT_SECRET)
-        sp_tid = sp_tid_secret.value if sp_tid_secret and sp_tid_secret.value else TENANT_ID
-    except Exception:
-        sp_tid = TENANT_ID
 
-    logger.info("SP creds fetched from KV — sp_client_id=%s...", sp_id[:8] if len(sp_id) > 8 else sp_id)
+    try:
+        sp_tid_secret = kv.get_secret(tenant_secret_name)
+        sp_tid: str = (sp_tid_secret.value or TENANT_ID or "") if sp_tid_secret else (TENANT_ID or "")
+    except Exception:
+        sp_tid = TENANT_ID or ""
+
+    logger.info(
+        "SP creds fetched from KV — sp_name=%s sp_client_id=%s...",
+        sp_name or "(default)",
+        sp_id[:8] if len(sp_id) > 8 else sp_id,
+    )
     return sp_id, sp_secret, sp_tid
 
 
@@ -296,18 +317,20 @@ def get_sp_token(
 ) -> dict:
     """
     Get SP access token via client_credentials flow.
-    MSAL ConfidentialClientApplication caches the token in memory —
-    instantiate at module level to reuse across warm Function invocations.
+    MSAL ConfidentialClientApplication instances are cached per sp_client_id —
+    one entry per SP, reused across warm Function invocations.
     """
-    global _msal_app
+    global _msal_apps
 
-    # Lazy-init singleton MSAL app (survives warm restarts)
-    if _msal_app is None:
-        _msal_app = ConfidentialClientApplication(
+    # Lazy-init per-SP MSAL app (keyed by client_id)
+    if sp_client_id not in _msal_apps:
+        _msal_apps[sp_client_id] = ConfidentialClientApplication(
             client_id=sp_client_id,
             client_credential=sp_client_secret,
             authority=f"https://login.microsoftonline.com/{sp_tenant_id}",
         )
+
+    msal_app = _msal_apps[sp_client_id]
 
     scope = (
         target_scope
@@ -316,7 +339,7 @@ def get_sp_token(
     )
 
     # acquire_token_for_client checks the cache first — only calls Entra if expired
-    result: Optional[dict] = _msal_app.acquire_token_for_client(scopes=[scope])
+    result: Optional[dict] = msal_app.acquire_token_for_client(scopes=[scope])
 
     if not result:
         raise RuntimeError("MSAL returned empty result")
@@ -417,18 +440,22 @@ def get_sp_token_handler(req: func.HttpRequest) -> func.HttpResponse:
             logger.error("Authorization error: %s", e)
             return _error(500, "authorization_error", str(e))
 
-    # ── Step 5: Parse target scope from body ──────────────────────
+    # ── Step 5: Parse request body ────────────────────────────────
     try:
         body = req.get_json()
         target_scope = body.get("targetScope", "https://management.azure.com/.default")
+        # spName selects which SP to use (must match KV secret prefix).
+        # If omitted, falls back to the default SP configured via env vars.
+        sp_name: Optional[str] = body.get("spName")  # e.g. "fabric-synapse-sp"
     except Exception:
         target_scope = "https://management.azure.com/.default"
+        sp_name = None
 
     # ── Step 6: Fetch SP credentials from KV ─────────────────────
     try:
-        sp_id, sp_secret, sp_tid = get_sp_creds(kv)
+        sp_id, sp_secret, sp_tid = get_sp_creds(kv, sp_name=sp_name)
     except Exception as e:
-        logger.error("KV secret fetch failed: %s", e)
+        logger.error("KV secret fetch failed (sp_name=%s): %s", sp_name, e)
         return _error(500, "keyvault_error", str(e))
 
     # ── Step 7: Acquire SP token ──────────────────────────────────
@@ -454,10 +481,13 @@ def get_sp_token_handler(req: func.HttpRequest) -> func.HttpResponse:
         },
     }
 
+    response["sp_name"] = sp_name or "(default)"
+
     logger.info(
-        "SP token returned — caller_type=%s caller=%s scope=%s",
+        "SP token returned — caller_type=%s caller=%s sp_name=%s scope=%s",
         caller["type"],
         caller["display"],
+        sp_name or "(default)",
         target_scope,
     )
     return func.HttpResponse(
