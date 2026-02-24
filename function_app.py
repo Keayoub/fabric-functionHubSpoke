@@ -115,19 +115,37 @@ def validate_token(auth_header: str) -> dict:
     public_key_pem = jwt.algorithms.RSAAlgorithm.from_jwk(json.dumps(jwks_key))
 
     # Verify and decode — PyJWT checks exp, nbf, iss, aud automatically
-    claims = jwt.decode(
-        token,
-        key=public_key_pem,
-        algorithms=["RS256"],
-        audience=f"api://{FUNC_APP_CLIENT_ID}",
-        issuer=ISSUER,
-        options={
-            "verify_exp": True,
-            "verify_nbf": True,
-            "verify_iss": True,
-            "verify_aud": True,
-        },
-    )
+    # Accept both "api://CLIENT_ID" and "CLIENT_ID" formats for audience
+    try:
+        claims = jwt.decode(
+            token,
+            key=public_key_pem,
+            algorithms=["RS256"],
+            audience=f"api://{FUNC_APP_CLIENT_ID}",
+            issuer=ISSUER,
+            options={
+                "verify_exp": True,
+                "verify_nbf": True,
+                "verify_iss": True,
+                "verify_aud": True,
+            },
+        )
+    except jwt.InvalidAudienceError:
+        # If "api://" prefix fails, try without it
+        logger.info("Retrying audience validation without api:// prefix")
+        claims = jwt.decode(
+            token,
+            key=public_key_pem,
+            algorithms=["RS256"],
+            audience=FUNC_APP_CLIENT_ID,
+            issuer=ISSUER,
+            options={
+                "verify_exp": True,
+                "verify_nbf": True,
+                "verify_iss": True,
+                "verify_aud": True,
+            },
+        )
     return claims
 
 
