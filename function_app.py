@@ -75,8 +75,6 @@ def _get_jwks() -> dict:
 # ══════════════════════════════════════════════════════════════════
 # SECTION 2 — JWT VALIDATION
 # ══════════════════════════════════════════════════════════════════
-
-
 def validate_token(auth_header: str) -> dict:
     """
     Validate Bearer JWT from Fabric (user or MSI).
@@ -121,7 +119,7 @@ def validate_token(auth_header: str) -> dict:
         token,
         key=public_key_pem,
         algorithms=["RS256"],
-        audience=FUNC_APP_CLIENT_ID,
+        audience=f"api://{FUNC_APP_CLIENT_ID}",
         issuer=ISSUER,
         options={
             "verify_exp": True,
@@ -183,7 +181,6 @@ def resolve_caller(claims: dict) -> dict:
 # ══════════════════════════════════════════════════════════════════
 # SECTION 4 — AUTHORIZATION
 # ══════════════════════════════════════════════════════════════════
-
 def _get_kv_client() -> SecretClient:
     """Return a Key Vault client using appropriate credentials."""
     if not KEY_VAULT_URL:
@@ -250,7 +247,6 @@ def authorize_caller(caller: dict, kv: SecretClient) -> None:
         )
 
     logger.info("MSI authorized — oid=%s", caller_oid)
-
 
 # ══════════════════════════════════════════════════════════════════
 # SECTION 5 — KEY VAULT: SP CREDENTIALS
@@ -356,9 +352,7 @@ def get_sp_token(
 # ══════════════════════════════════════════════════════════════════
 # SECTION 7 — HTTP TRIGGER (Python v2 Programming Model)
 # ══════════════════════════════════════════════════════════════════
-
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
-
 
 @app.route(route="health", methods=["GET"])
 def health_check(req: func.HttpRequest) -> func.HttpResponse:
