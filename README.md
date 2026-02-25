@@ -73,10 +73,10 @@ This project uses **Python 3.12** with the **v2 programming model** (`@app.route
 
 ```powershell
 # Variables (update these)
-$RESOURCE_GROUP = "Fabric-Demos"
+$RESOURCE_GROUP = "Your_ressource_group"
 $LOCATION = "eastus2"
-$FUNCTION_APP = "fabricmpeapis"
-$KEY_VAULT = "kaydemokeyvault"
+$FUNCTION_APP = "your_function_name"
+$KEY_VAULT = "your_key_vault_name"
 
 # Create Function App (Flex Consumption recommended for cost efficiency)
 az functionapp create `
