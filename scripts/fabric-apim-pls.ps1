@@ -11,8 +11,8 @@ $LOCATION            = "eastus2"
 
 # APIM
 $APIM_NAME           = "apim-dev01"
-$PUBLISHER_EMAIL     = "keayoub"
-$PUBLISHER_NAME      = "Ayoub KEB"
+$PUBLISHER_EMAIL     = "yourpub@domain.com"
+$PUBLISHER_NAME      = "Company Name"
 
 # Networking
 $VNET_NAME           = "vnet-apim"
