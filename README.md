@@ -407,7 +407,215 @@ traces
 - MSI caller: Function uses delegated fallback (`acquire_token_for_client`)
 - Response includes `flow` to indicate which path was used
 
-## 📚 References
+## � Passthrough vs Delegated: Complete Comparison
+
+This Function App supports **two security patterns** via separate endpoints:
+
+| Endpoint | Pattern | Identity Forwarded | Use Case |
+|---|---|---|---|
+| `/api/GetPassthroughToken` | **Passthrough (OBO)** for users, **Delegated** fallback for MSI | ✅ User's own identity | RLS enforcement, audit trail, tenant isolation |
+| `/api/GetSPToken` | **Delegated (client_credentials)** only | ❌ SP identity substituted | Centralized authorization, simple RBAC |
+
+---
+
+### 🔐 Authentication Flow
+
+| Aspect | **Passthrough** (`GetPassthroughToken`) | **Delegated** (`GetSPToken`) |
+|---|---|---|
+| **Flow type** | `on_behalf_of` (OBO) for USER<br>`client_credentials` for MSI | `client_credentials` always |
+| **MSAL method** | `acquire_token_on_behalf_of()` | `acquire_token_for_client()` |
+| **Input token** | Caller's JWT **forwarded** downstream | Caller's JWT **validated but discarded** |
+| **Output identity** | **User's own identity** preserved | **Service Principal's identity** substituted |
+| **Token `sub` claim** | User's OID (e.g., `alice@contoso.com`) | SP's OID (e.g., `00000000-sp-id`) |
+
+---
+
+### 👤 Identity & Claims in Downstream Token
+
+| Token Claim | **Passthrough (OBO)** | **Delegated (SP)** |
+|---|---|---|
+| **`sub`** | User's object ID | SP's object ID |
+| **`oid`** | User's Entra object ID | SP's Entra object ID |
+| **`upn`** | User's UPN (`alice@contoso.com`) | N/A (SPs don't have UPNs) |
+| **`scp`** | Delegated scopes (e.g., `user_impersonation`) | N/A |
+| **`roles`** | N/A | Application roles (e.g., `Storage.Blob.Data.Contributor`) |
+| **Downstream sees** | Real user identity | SP identity only |
+| **Audit trail** | Shows actual user at each hop | Shows SP at storage/API level |
+
+**Example Token Claims:**
+
+**Passthrough (OBO) Token:**
+```json
+{
+  "aud": "https://storage.azure.com",
+  "sub": "alice@contoso.com",
+  "oid": "11111111-user-alice-oid",
+  "upn": "alice@contoso.com",
+  "scp": "user_impersonation",
+  "app_displayname": "Fabric Hub Function"
+}
+```
+→ Storage sees **Alice** as the requester
+
+**Delegated (SP) Token:**
+```json
+{
+  "aud": "https://storage.azure.com",
+  "sub": "00000000-sp-client-id",
+  "oid": "00000000-sp-object-id",
+  "roles": ["Storage.Blob.Data.Contributor"],
+  "app_displayname": "FabricHubSP"
+}
+```
+→ Storage sees **SP** as the requester (Alice is invisible)
+
+---
+
+### 🔒 Security Model
+
+| Aspect | **Passthrough** | **Delegated** |
+|---|---|---|
+| **Security enforcement** | At **each hop**<br>(Function validates, then target validates user) | At **Function only**<br>(target trusts SP, Function is gatekeeper) |
+| **Row-level security (RLS)** | ✅ Works — target sees user identity | ❌ Bypassed — target sees SP<br>(must enforce RLS in Function code) |
+| **Least privilege** | ✅ User needs permissions on target | ⚠️ SP needs broad permissions<br>(shared by all users) |
+| **Blast radius if compromised** | Limited to user's permissions | Entire SP scope (all data SP can access) |
+| **Compliance audit** | ✅ Full user chain visible in logs | ⚠️ Audit shows SP only<br>(must log caller separately) |
+
+---
+
+### 🛠️ Azure AD Configuration Required
+
+#### Passthrough (OBO) Configuration
+
+```yaml
+Function App Registration:
+  Expose an API:
+    - Application ID URI: api://<FUNC_APP_CLIENT_ID>
+    - Scope: user_impersonation
+  
+  API Permissions:
+    - Add delegated permissions for target resources
+      Example: "Azure Storage" → "user_impersonation"
+    - Admin consent: Required per scope
+
+Service Principal (the one in Key Vault):
+  Type: Delegated permissions (acts on behalf of user)
+  Permissions: Delegated scope on target resource
+  Admin consent: Required
+```
+
+#### Delegated (client_credentials) Configuration
+
+```yaml
+Function App Registration:
+  Expose an API:
+    - Application ID URI: api://<FUNC_APP_CLIENT_ID>
+    - Scope: user_impersonation (for caller authentication only)
+  
+  API Permissions:
+    - None needed (SP uses direct RBAC on resources)
+
+Service Principal (the one in Key Vault):
+  Type: Application permissions
+  Permissions: RBAC role assignments on target resources
+    Example: "Storage Blob Data Contributor" on ADLS Gen2
+  Admin consent: Required
+```
+
+---
+
+### 🎯 Use Case Comparison
+
+| Scenario | **Passthrough** | **Delegated** |
+|---|---|---|
+| **Fabric RLS enforcement** | ✅ RLS works (Fabric sees real user) | ❌ RLS bypassed (Fabric sees SP) |
+| **Multi-tenant SaaS** | ✅ Tenant isolation automatic | ❌ Must filter by caller OID in Function |
+| **User consent flows** | ✅ Can prompt user for consent | ❌ Admin pre-consent only |
+| **MSI/pipeline callers** | ✅ Hybrid: falls back to `client_credentials` | ✅ Works seamlessly |
+| **Compliance/audit** | ✅ Full user chain visible | ⚠️ Audit shows SP, must log caller separately |
+| **Setup complexity** | ⚠️ Requires delegated API permissions | ✅ Simple RBAC role assignment |
+| **Centralized authorization** | ❌ Authorization at target resource | ✅ Authorization in Function only |
+
+---
+
+### 📊 Performance & Caching
+
+| Aspect | **Passthrough** | **Delegated** |
+|---|---|---|
+| **Token cache scope** | Per-user (separate cache per assertion) | Shared (one token serves all callers) |
+| **Cache efficiency** | Lower (each user = separate entry) | Higher (single cached token) |
+| **Token lifetime** | Typically 1 hour | Typically 1 hour |
+| **Revocation** | User's token revocation cascades | SP token valid until expiry |
+| **MSAL cache key** | `obo:<sp_client_id>` | `<sp_client_id>` |
+
+---
+
+### ⚖️ Decision Matrix
+
+| Your Goal | Recommended Endpoint |
+|---|---|
+| Enforce data permissions at source (RLS, ACLs) | **`/api/GetPassthroughToken`** |
+| Centralized authorization in Function only | **`/api/GetSPToken`** |
+| Support both user AND MSI callers | **`/api/GetPassthroughToken`** (hybrid) |
+| Minimize Azure AD configuration complexity | **`/api/GetSPToken`** |
+| Maximum security isolation per user | **`/api/GetPassthroughToken`** |
+| Simplest RBAC (one SP role assignment) | **`/api/GetSPToken`** |
+| Compliance requires user audit trail at storage | **`/api/GetPassthroughToken`** |
+| Need user-specific data filtering by target service | **`/api/GetPassthroughToken`** |
+
+---
+
+### 🔄 Architecture Mapping
+
+Looking at the diagram at the top of this README:
+
+**Green dashed lines (Passthrough):**
+- Spoke Lakehouse A → Hub → ADLS Gen2 using **User A's identity**
+- User A sees only their data (enforced by ADLS ACLs on storage)
+- Fabric RLS works correctly
+
+**Orange dashed lines (Delegated):**
+- Spoke Lakehouse B → Hub → ADLS Gen2 using **SP identity**
+- Function must filter data by caller OID (captured in `caller["oid"]`)
+- Target resource sees SP, so all authorization happens at Function level
+
+**Hybrid endpoint (`/api/GetPassthroughToken`):**
+- Automatically chooses the right pattern:
+  - **USER caller** → OBO (Passthrough): `acquire_token_on_behalf_of()`
+  - **MSI caller** → client_credentials (Delegated fallback): `acquire_token_for_client()`
+- Response includes `"flow": "obo"` or `"flow": "client_credentials"` to indicate which was used
+
+---
+
+### 📝 Implementation Summary
+
+| Code Section | Passthrough | Delegated |
+|---|---|---|
+| **Function** | `get_obo_token()` | `get_sp_token()` |
+| **Endpoint** | `/api/GetPassthroughToken` | `/api/GetSPToken` |
+| **Caller detection** | `resolve_caller()` resolves USER vs MSI | `resolve_caller()` (same) |
+| **Authorization** | `authorize_caller()` checks whitelist | `authorize_caller()` (same) |
+| **Token flow logic** | If USER + raw_token: OBO<br>Else: client_credentials | Always client_credentials |
+| **MSAL cache key** | `obo:<sp_client_id>` | `<sp_client_id>` |
+
+---
+
+### 🚨 Important Limitations
+
+**Passthrough (OBO) cannot work for:**
+- MSI/app-only tokens (no user assertion available)
+  - Solution: Hybrid endpoint automatically falls back to `client_credentials`
+- Tokens that don't target your Function's audience
+  - Solution: Ensure caller uses `mssparkutils.credentials.getToken(f"api://{FUNC_APP_CLIENT_ID}")`
+
+**Delegated (client_credentials) limitations:**
+- RLS enforcement requires Function-side filtering
+- Compliance audits must log caller identity separately
+- All callers share SP's broad permissions (larger blast radius)
+
+---
+
+## �📚 References
 
 - [Azure Functions Python v2 Programming Model](https://learn.microsoft.com/azure/azure-functions/functions-reference-python?pivots=python-mode-decorators)
 - [Microsoft Fabric Workspace Identity](https://learn.microsoft.com/fabric/security/workspace-identity)
