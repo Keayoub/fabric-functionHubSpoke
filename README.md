@@ -234,13 +234,13 @@ Expected response:
    # Health check
    Invoke-WebRequest http://localhost:7071/api/health
 
-   # Get SP token (requires valid bearer token)
+    # Get token via combined passthrough endpoint (requires valid bearer token)
    $TOKEN = "<your-test-bearer-token>"
-   Invoke-WebRequest http://localhost:7071/api/GetSPToken `
+    Invoke-WebRequest http://localhost:7071/api/GetPassthroughToken `
      -Method POST `
      -Headers @{"Authorization"="Bearer $TOKEN"} `
      -ContentType "application/json" `
-     -Body '{"targetScope": "https://database.windows.net/.default"}'
+       -Body '{"targetScope": "https://database.windows.net/.default"}'
    ```
 
 ## 📝 Usage in Fabric Notebooks
@@ -254,19 +254,21 @@ from notebookutils import mssparkutils
 import requests
 
 FUNC_APP_CLIENT_ID = "your_function_app_ID"  # Your Function App's Entra app registration
-FUNCTION_URL = "https://your_function_name.azurewebsites.net/api/GetSPToken"
+FUNCTION_URL = "https://your_function_name.azurewebsites.net/api/GetPassthroughToken"
 
 # Get token to call the Function (proves your identity to the Function)
 fabric_token = mssparkutils.credentials.getToken(f"api://{FUNC_APP_CLIENT_ID}")
 
-# Call Function to get Service Principal token for target resource
+# Call Function to get token for target resource
 response = requests.post(
     FUNCTION_URL,
     headers={"Authorization": f"Bearer {fabric_token}"},
     json={"targetScope": "https://database.windows.net/.default"}  # For Azure SQL
 )
 
-sp_token = response.json()["access_token"]
+response_body = response.json()
+sp_token = response_body["access_token"]
+print("Flow used:", response_body.get("flow"))  # "obo" for USER, "client_credentials" for MSI
 # Use sp_token to connect to Azure SQL, Azure Management API, etc.
 ```
 
@@ -383,21 +385,27 @@ traces
 | Token | Acquired by | Audience | Purpose |
 |-------|-------------|----------|---------|
 | **Fabric Token** | `mssparkutils.credentials.getToken()` | `api://FUNC_APP_CLIENT_ID` | Proves your identity **to the Function** |
-| **SP Token** | Function → MSAL | Target resource (e.g., `https://database.windows.net/`) | Used to connect **to the actual resource** |
+| **Broker Token** | Function → MSAL (`acquire_token_on_behalf_of` or `acquire_token_for_client`) | Target resource (e.g., `https://database.windows.net/`) | Used to connect **to the actual resource** |
 
 ### The `/.default` Suffix Rule
 
 | Call | Correct Value | Why |
 |------|---------------|-----|
 | `mssparkutils.credentials.getToken(audience)` | `api://<CLIENT_ID>` | Fabric Token Manager requires resource URI **without** `/.default` |
-| `targetScope` in Function POST body | `https://database.windows.net/.default` | MSAL `acquire_token_for_client` requires scope **with** `/.default` |
+| `targetScope` in Function POST body | `https://database.windows.net/.default` | MSAL server-side token acquisition requires scope **with** `/.default` |
 
 ### OAP Bypass Flow
 
 1. ❌ Fabric **cannot** call `login.microsoftonline.com` (blocked by OAP)
 2. ✅ Fabric **calls Function via MPE** (allowed network path)
 3. ✅ Function **calls Entra ID** (outside Fabric, unrestricted)
-4. ✅ Fabric **uses returned SP token** to connect to target resource directly
+4. ✅ Fabric **uses returned token** to connect to target resource directly
+
+### Combined Flow Behavior
+
+- USER caller: Function uses OBO passthrough (`acquire_token_on_behalf_of`)
+- MSI caller: Function uses delegated fallback (`acquire_token_for_client`)
+- Response includes `flow` to indicate which path was used
 
 ## 📚 References
 
@@ -414,7 +422,7 @@ traces
 
 - This solution is ideal for Fabric environments with **OAP enabled** where direct Entra ID calls are blocked
 - The SP stored in Key Vault must have appropriate RBAC/permissions on target Azure resources
-- Function App endpoints `/api/health` and `/api/GetSPToken` are the only exposed routes
+- Function App endpoints `/api/health`, `/api/GetSPToken`, and `/api/GetPassthroughToken` are exposed routes
 - Portal function listing may show stale data; actual endpoints are tested via direct HTTP calls
 - Python v2 model with `@app.route()` decorators requires `AzureWebJobsFeatureFlags=EnableWorkerIndexing`
 - Use SQLAlchemy for Azure SQL connections to avoid pandas warnings about raw DBAPI2 connections

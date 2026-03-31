@@ -75,10 +75,10 @@ def _get_jwks() -> dict:
 # ══════════════════════════════════════════════════════════════════
 # SECTION 2 — JWT VALIDATION
 # ══════════════════════════════════════════════════════════════════
-def validate_token(auth_header: str) -> dict:
+def validate_token(auth_header: str) -> tuple[dict, str]:
     """
     Validate Bearer JWT from Fabric (user or MSI).
-    Returns decoded claims dict on success.
+    Returns (decoded_claims, raw_token) on success.
     Raises ValueError on any validation failure.
     """
     if not auth_header or not auth_header.startswith("Bearer "):
@@ -146,7 +146,7 @@ def validate_token(auth_header: str) -> dict:
                 "verify_aud": True,
             },
         )
-    return claims
+    return claims, token
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -368,6 +368,63 @@ def get_sp_token(
 
 
 # ══════════════════════════════════════════════════════════════════
+# SECTION 6.5 — OBO TOKEN (On-Behalf-Of / Passthrough)
+# ══════════════════════════════════════════════════════════════════
+def get_obo_token(
+    sp_client_id: str,
+    sp_client_secret: str,
+    sp_tenant_id: str,
+    user_assertion: str,
+    target_scope: str,
+) -> dict:
+    """
+    Get a token via On-Behalf-Of (OBO) flow using the caller's raw JWT.
+    This implements the Passthrough pattern — the caller's own identity is
+    forwarded downstream (not substituted by the SP).
+
+    Prerequisites (Azure AD config):
+    - The Function App registration must expose an API with 'user_impersonation' scope
+    - The SP must have *delegated* permissions on the target resource
+    - Only works for real USER tokens (MSI/app-only tokens cannot do OBO)
+    """
+    global _msal_apps
+
+    # Use a separate cache key so OBO and client_credentials apps don't collide
+    obo_key = f"obo:{sp_client_id}"
+    if obo_key not in _msal_apps:
+        _msal_apps[obo_key] = ConfidentialClientApplication(
+            client_id=sp_client_id,
+            client_credential=sp_client_secret,
+            authority=f"https://login.microsoftonline.com/{sp_tenant_id}",
+        )
+
+    msal_app = _msal_apps[obo_key]
+
+    scope = (
+        target_scope
+        if target_scope.endswith("/.default")
+        else target_scope.rstrip("/") + "/.default"
+    )
+
+    result: Optional[dict] = msal_app.acquire_token_on_behalf_of(
+        user_assertion=user_assertion,
+        scopes=[scope],
+    )
+
+    if not result:
+        raise RuntimeError("MSAL OBO returned empty result")
+
+    if "error" in result:
+        raise RuntimeError(
+            f"MSAL OBO error: {result.get('error', 'unknown')} — "
+            f"{result.get('error_description', '')}"
+        )
+
+    logger.info("OBO token ready — expires_in=%ss", result.get("expires_in"))
+    return result
+
+
+# ══════════════════════════════════════════════════════════════════
 # SECTION 7 — HTTP TRIGGER (Python v2 Programming Model)
 # ══════════════════════════════════════════════════════════════════
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
@@ -427,7 +484,7 @@ def get_sp_token_handler(req: func.HttpRequest) -> func.HttpResponse:
     else:
         # Production: validate JWT
         try:
-            claims = validate_token(req.headers.get("Authorization", ""))
+            claims, _raw_token = validate_token(req.headers.get("Authorization", ""))
         except (ValueError, Exception) as e:
             logger.warning("Token validation failed: %s", e)
             return _error(401, "unauthorized", str(e))
@@ -497,6 +554,139 @@ def get_sp_token_handler(req: func.HttpRequest) -> func.HttpResponse:
 
     logger.info(
         "SP token returned — caller_type=%s caller=%s sp_name=%s scope=%s",
+        caller["type"],
+        caller["display"],
+        sp_name or "(default)",
+        target_scope,
+    )
+    return func.HttpResponse(
+        json.dumps(response), status_code=200, mimetype="application/json"
+    )
+
+
+@app.route(route="GetPassthroughToken", methods=["POST"])
+def get_passthrough_token_handler(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    HTTP POST endpoint: /api/GetPassthroughToken
+
+    Hybrid token broker implementing the Passthrough + Delegated combined pattern:
+    - USER callers  → OBO (On-Behalf-Of) flow: caller's own identity is forwarded
+                      downstream (Passthrough). Security applied at each hop.
+    - MSI callers   → client_credentials flow: SP identity is substituted
+                      (Delegated fallback — MSI tokens cannot do OBO).
+
+    Request body:
+    {
+        "targetScope": "https://storage.azure.com/.default",
+        "spName": "fabric-adls-sp"   # optional — selects KV secret prefix
+    }
+
+    Response (200):
+    {
+        "access_token": "...",
+        "token_type": "Bearer",
+        "expires_in": 3600,
+        "scope": "...",
+        "flow": "obo" | "client_credentials",
+        "caller": { "type", "oid", "display", "is_pipeline" }
+    }
+    """
+    logger.info("GetPassthroughToken triggered")
+
+    is_local_dev = not os.environ.get("WEBSITE_INSTANCE_ID")
+
+    # ── Step 1: Validate JWT ──────────────────────────────────────
+    if is_local_dev:
+        logger.info("LOCAL DEV MODE: Skipping JWT validation")
+        caller = {
+            "type": "USER",
+            "oid": "local-test-user",
+            "display": "local-dev@test.com",
+            "upn": "local-dev@test.com",
+            "appid": None,
+            "is_pipeline": False,
+            "tid": TENANT_ID,
+        }
+        raw_token: Optional[str] = None
+    else:
+        try:
+            claims, raw_token = validate_token(req.headers.get("Authorization", ""))
+        except (ValueError, Exception) as e:
+            logger.warning("Token validation failed: %s", e)
+            return _error(401, "unauthorized", str(e))
+        caller = resolve_caller(claims)
+
+    # ── Step 2: KV client ─────────────────────────────────────────
+    try:
+        kv = _get_kv_client()
+    except Exception as e:
+        logger.error("KV client init failed: %s", e)
+        return _error(500, "keyvault_error", str(e))
+
+    # ── Step 3: Authorize ─────────────────────────────────────────
+    if not is_local_dev:
+        try:
+            authorize_caller(caller, kv)
+        except PermissionError as e:
+            return _error(403, "forbidden", str(e))
+        except Exception as e:
+            logger.error("Authorization error: %s", e)
+            return _error(500, "authorization_error", str(e))
+
+    # ── Step 4: Parse request body ────────────────────────────────
+    try:
+        body = req.get_json()
+        target_scope = body.get("targetScope", "https://storage.azure.com/.default")
+        sp_name: Optional[str] = body.get("spName")
+    except Exception:
+        target_scope = "https://storage.azure.com/.default"
+        sp_name = None
+
+    # ── Step 5: Fetch SP credentials from KV ─────────────────────
+    try:
+        sp_id, sp_secret, sp_tid = get_sp_creds(kv, sp_name=sp_name)
+    except Exception as e:
+        logger.error("KV secret fetch failed (sp_name=%s): %s", sp_name, e)
+        return _error(500, "keyvault_error", str(e))
+
+    # ── Step 6: Choose flow based on caller type ──────────────────
+    #   USER → OBO (Passthrough): forwards caller's identity downstream
+    #   MSI  → client_credentials (Delegated): MSI tokens cannot do OBO
+    try:
+        if caller["type"] == "USER" and raw_token:
+            tok = get_obo_token(sp_id, sp_secret, sp_tid, raw_token, target_scope)
+            flow = "obo"
+        else:
+            if caller["type"] == "USER":
+                # local dev: no real token available — fall back to client_credentials
+                logger.info("LOCAL DEV: no raw token, using client_credentials fallback")
+            else:
+                logger.info("MSI caller — using client_credentials (Delegated) flow")
+            tok = get_sp_token(sp_id, sp_secret, sp_tid, target_scope)
+            flow = "client_credentials"
+    except RuntimeError as e:
+        logger.error("Token acquisition error (flow=%s): %s", "obo" if caller["type"] == "USER" else "client_credentials", e)
+        return _error(500, "token_error", str(e))
+
+    # ── Step 7: Return token + audit info ────────────────────────
+    response = {
+        "access_token": tok["access_token"],
+        "token_type": tok.get("token_type", "Bearer"),
+        "expires_in": tok.get("expires_in", 3600),
+        "scope": tok.get("scope", target_scope),
+        "flow": flow,
+        "caller": {
+            "type": caller["type"],
+            "oid": caller["oid"],
+            "display": caller["display"],
+            "is_pipeline": caller["is_pipeline"],
+        },
+        "sp_name": sp_name or "(default)",
+    }
+
+    logger.info(
+        "Passthrough token returned — flow=%s caller_type=%s caller=%s sp_name=%s scope=%s",
+        flow,
         caller["type"],
         caller["display"],
         sp_name or "(default)",
