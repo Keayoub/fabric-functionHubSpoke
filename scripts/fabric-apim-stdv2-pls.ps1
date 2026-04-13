@@ -24,6 +24,20 @@
 #   .\fabric-apim-stdv2-pls.ps1
 # =============================================================================
 
+param(
+    [switch]$ValidateOnly,
+    [string]$FabricWorkspaceId,
+    [string]$PublisherEmail,
+    [string]$PublisherName
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
+if ($PSVersionTable.PSVersion.Major -ge 7) {
+    $PSNativeCommandUseErrorActionPreference = $true
+}
+
 #region --- CONFIGURATION ---
 
 $RG                  = "rg-apim"
@@ -56,7 +70,7 @@ $NSG_VM_NAME         = "nsg-vm"
 
 # Linux VM (IP forwarder)
 $VM_NAME             = "vm-pls-forwarder"
-$VM_SIZE             = "Standard_B2s"   # ~CAD$35/month
+$VM_SIZE             = "Standard_B2s"
 $VM_ADMIN            = "azureuser"
 $VM_IMAGE            = "Ubuntu2204"
 
@@ -68,11 +82,16 @@ $PE_NAME             = "pe-apim-inbound"
 $PE_DNS_ZONE         = "privatelink.azure-api.net"
 
 # Fabric — get workspace ID from browser URL:
-#   https://app.fabric.microsoft.com/groups/{workspace-id}/...
+# https://app.fabric.microsoft.com/groups/{workspace-id}/...
 $FABRIC_WS_ID        = "<your-fabric-workspace-id>"
 $MPE_NAME            = "mpe-apim-stdv2"
 
 #endregion
+
+# Allow passing key values as parameters instead of editing the script.
+if ($PSBoundParameters.ContainsKey("FabricWorkspaceId")) { $FABRIC_WS_ID = $FabricWorkspaceId }
+if ($PSBoundParameters.ContainsKey("PublisherEmail")) { $PUBLISHER_EMAIL = $PublisherEmail }
+if ($PSBoundParameters.ContainsKey("PublisherName")) { $PUBLISHER_NAME = $PublisherName }
 
 #region --- HELPERS ---
 
@@ -93,22 +112,121 @@ function LogError($msg) {
     exit 1
 }
 
-function WaitProvisioning($label, $scriptBlock, $interval = 60) {
+function WaitProvisioning($label, $scriptBlock, $interval = 60, $maxAttempts = 60) {
     Log "Waiting for: $label ..."
-    while ($true) {
-        $state = & $scriptBlock
+    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+        $state = (& $scriptBlock | Select-Object -First 1)
         Write-Host "  $(Get-Date -Format 'HH:mm:ss')  $state"
         if ($state -eq "Succeeded") { LogOk "$label provisioned."; break }
         if ($state -eq "Failed")    { LogError "$label failed." }
+        if (-not $state)              { LogWarn "$label state not available yet (attempt $attempt of $maxAttempts)." }
+        if ($attempt -eq $maxAttempts) { LogError "$label did not reach Succeeded within the allotted time." }
         Start-Sleep -Seconds $interval
     }
 }
 
 function WriteJson($path, $content) {
-    $content | Out-File -FilePath $path -Encoding utf8
+    $content | Set-Content -FilePath $path -Encoding utf8NoBOM
+}
+
+function TryGetValue($scriptBlock) {
+    try {
+        $result = & $scriptBlock 2>$null
+        return ($result | Select-Object -First 1)
+    }
+    catch {
+        return $null
+    }
+}
+
+function GetFabricToken() {
+    $token = az account get-access-token --resource https://api.fabric.microsoft.com --query "accessToken" -o tsv
+    if (-not $token) {
+        LogError "Unable to acquire a Fabric access token from Azure CLI."
+    }
+
+    return $token
+}
+
+function GetFabricManagedPrivateEndpointByName($workspaceId, $mpeName, $fabricToken) {
+    $response = Invoke-RestMethod `
+        -Method GET `
+        -Uri "https://api.fabric.microsoft.com/v1/workspaces/$workspaceId/managedPrivateEndpoints" `
+        -Headers @{ "Authorization" = "Bearer $fabricToken" }
+
+    $items = if ($response.value) {
+        $response.value
+    }
+    elseif ($response.managedPrivateEndpoints) {
+        $response.managedPrivateEndpoints
+    }
+    elseif ($response -is [System.Array]) {
+        $response
+    }
+    else {
+        @()
+    }
+
+    return @($items | Where-Object { $_.name -eq $mpeName })[0]
+}
+
+function GetFabricManagedPrivateEndpointById($workspaceId, $mpeId, $fabricToken) {
+    return Invoke-RestMethod `
+        -Method GET `
+        -Uri "https://api.fabric.microsoft.com/v1/workspaces/$workspaceId/managedPrivateEndpoints/$mpeId" `
+        -Headers @{ "Authorization" = "Bearer $fabricToken" }
+}
+
+function AssertPrerequisites() {
+    Get-Command az -ErrorAction Stop | Out-Null
+
+    if ($FABRIC_WS_ID -match "^<.*>$") {
+        LogError "Set FABRIC_WS_ID in the configuration section before running the script."
+    }
+
+    if ($PUBLISHER_EMAIL -match "yourdomain\.com" -or $PUBLISHER_NAME -eq "Your Organisation") {
+        LogError "Set publisher details in the configuration section before running the script."
+    }
+
+    if (-not ($FABRIC_WS_ID -match "^[0-9a-fA-F-]{36}$")) {
+        LogError "FABRIC_WS_ID must be a Fabric workspace GUID."
+    }
+
+    $accountId = az account show --query "id" -o tsv
+    if (-not $accountId) {
+        LogError "Azure CLI is not logged in. Run 'az login' and select the correct subscription first."
+    }
+
+    $plsFeatureState = az feature show --namespace Microsoft.Network --name AllowPrivateLinkserviceUDR --query "properties.state" -o tsv
+    if ($plsFeatureState -ne "Registered") {
+        LogError "Feature Microsoft.Network/AllowPrivateLinkserviceUDR must be Registered before running this script. Current state: $plsFeatureState"
+    }
+
+    $fabricToken = GetFabricToken
+    try {
+        Invoke-RestMethod `
+            -Method GET `
+            -Uri "https://api.fabric.microsoft.com/v1/workspaces/$FABRIC_WS_ID/managedPrivateEndpoints" `
+            -Headers @{ "Authorization" = "Bearer $fabricToken" } | Out-Null
+    }
+    catch {
+        LogError "Unable to access the Fabric managed private endpoints API for workspace $FABRIC_WS_ID. $($_.Exception.Message)"
+    }
 }
 
 #endregion
+
+trap {
+    $message = if ($_.Exception) { $_.Exception.Message } else { $_.ToString() }
+    LogError $message
+}
+
+AssertPrerequisites
+
+if ($ValidateOnly) {
+    LogOk "Validation completed. Configuration, Azure access, feature registration, and Fabric workspace access checks passed."
+    return
+}
 
 Write-Host ""
 Write-Host "================================================================" -ForegroundColor Cyan
@@ -230,15 +348,24 @@ Log "=== STEP 4: APIM Standard v2 ==="
 
 Log "Deploying APIM Standard v2 (~5-10 min) ..."
 
-az apim create `
-    --resource-group $RG `
-    --name $APIM_NAME `
-    --location $LOCATION `
-    --publisher-email $PUBLISHER_EMAIL `
-    --publisher-name "$PUBLISHER_NAME" `
-    --sku-name StandardV2 `
-    --sku-capacity 1 `
-    --no-wait | Out-Null
+$APIM_ID = TryGetValue {
+    az apim show --resource-group $RG --name $APIM_NAME --query "id" -o tsv
+}
+
+if (-not $APIM_ID) {
+    az apim create `
+        --resource-group $RG `
+        --name $APIM_NAME `
+        --location $LOCATION `
+        --publisher-email $PUBLISHER_EMAIL `
+        --publisher-name "$PUBLISHER_NAME" `
+        --sku-name StandardV2 `
+        --sku-capacity 1 `
+        --no-wait | Out-Null
+}
+else {
+    LogWarn "APIM $APIM_NAME already exists. Reusing existing instance."
+}
 
 WaitProvisioning "APIM Standard v2" {
     az apim show --resource-group $RG --name $APIM_NAME --query "provisioningState" -o tsv 2>$null
@@ -290,16 +417,28 @@ Log "=== STEP 6: APIM Private Endpoint (inbound) ==="
 $APIM_ID = az apim show `
     --resource-group $RG --name $APIM_NAME --query "id" -o tsv
 
-az network private-endpoint create `
-    --resource-group $RG `
-    --name $PE_NAME `
-    --location $LOCATION `
-    --vnet-name $VNET_NAME `
-    --subnet $PE_SUBNET `
-    --private-connection-resource-id $APIM_ID `
-    --group-id "Gateway" `
-    --connection-name "pe-apim-conn" | Out-Null
-LogOk "Private Endpoint created: $PE_NAME"
+$PE_NIC_ID = TryGetValue {
+    az network private-endpoint show `
+        --resource-group $RG `
+        --name $PE_NAME `
+        --query "networkInterfaces[0].id" -o tsv
+}
+
+if (-not $PE_NIC_ID) {
+    az network private-endpoint create `
+        --resource-group $RG `
+        --name $PE_NAME `
+        --location $LOCATION `
+        --vnet-name $VNET_NAME `
+        --subnet $PE_SUBNET `
+        --private-connection-resource-id $APIM_ID `
+        --group-id "Gateway" `
+        --connection-name "pe-apim-conn" | Out-Null
+    LogOk "Private Endpoint created: $PE_NAME"
+}
+else {
+    LogWarn "Private Endpoint $PE_NAME already exists. Reusing existing endpoint."
+}
 
 # Retrieve PE NIC private IP — this is what the VM will DNAT to
 $PE_NIC_ID = az network private-endpoint show `
@@ -315,23 +454,38 @@ if (-not $APIM_PE_IP) { LogError "Could not retrieve APIM PE private IP." }
 LogOk "APIM PE private IP: $APIM_PE_IP"
 
 # Private DNS zone so VNet can resolve apim-stdv2-poc.azure-api.net -> PE IP
-az network private-dns zone create `
-    --resource-group $RG `
-    --name $PE_DNS_ZONE | Out-Null
+if (-not (TryGetValue { az network private-dns zone show --resource-group $RG --name $PE_DNS_ZONE --query "name" -o tsv })) {
+    az network private-dns zone create `
+        --resource-group $RG `
+        --name $PE_DNS_ZONE | Out-Null
+}
+else {
+    LogWarn "Private DNS zone $PE_DNS_ZONE already exists. Reusing existing zone."
+}
 
-az network private-dns link vnet create `
-    --resource-group $RG `
-    --zone-name $PE_DNS_ZONE `
-    --name "dns-link-apim" `
-    --virtual-network $VNET_NAME `
-    --registration-enabled false | Out-Null
+if (-not (TryGetValue { az network private-dns link vnet show --resource-group $RG --zone-name $PE_DNS_ZONE --name "dns-link-apim" --query "name" -o tsv })) {
+    az network private-dns link vnet create `
+        --resource-group $RG `
+        --zone-name $PE_DNS_ZONE `
+        --name "dns-link-apim" `
+        --virtual-network $VNET_NAME `
+        --registration-enabled false | Out-Null
+}
+else {
+    LogWarn "Private DNS VNet link dns-link-apim already exists. Reusing existing link."
+}
 
-az network private-endpoint dns-zone-group create `
-    --resource-group $RG `
-    --endpoint-name $PE_NAME `
-    --name "apim-dns-group" `
-    --private-dns-zone $PE_DNS_ZONE `
-    --zone-name "apim" | Out-Null
+if (-not (TryGetValue { az network private-endpoint dns-zone-group show --resource-group $RG --endpoint-name $PE_NAME --name "apim-dns-group" --query "name" -o tsv })) {
+    az network private-endpoint dns-zone-group create `
+        --resource-group $RG `
+        --endpoint-name $PE_NAME `
+        --name "apim-dns-group" `
+        --private-dns-zone $PE_DNS_ZONE `
+        --zone-name "apim" | Out-Null
+}
+else {
+    LogWarn "Private Endpoint DNS zone group apim-dns-group already exists. Reusing existing mapping."
+}
 LogOk "Private DNS zone $PE_DNS_ZONE linked"
 
 # =============================================================================
@@ -340,19 +494,24 @@ Log "=== STEP 7: Linux VM (IP forwarder — PLS destination) ==="
 
 Log "Deploying Linux VM $VM_NAME (~3 min) ..."
 
-az vm create `
-    --resource-group $RG `
-    --name $VM_NAME `
-    --location $LOCATION `
-    --image $VM_IMAGE `
-    --size $VM_SIZE `
-    --admin-username $VM_ADMIN `
-    --generate-ssh-keys `
-    --vnet-name $VNET_NAME `
-    --subnet $VM_SUBNET `
-    --public-ip-address '""' `
-    --nsg '""' | Out-Null
-LogOk "VM created: $VM_NAME"
+if (-not (TryGetValue { az vm show --resource-group $RG --name $VM_NAME --query "id" -o tsv })) {
+    az vm create `
+        --resource-group $RG `
+        --name $VM_NAME `
+        --location $LOCATION `
+        --image $VM_IMAGE `
+        --size $VM_SIZE `
+        --admin-username $VM_ADMIN `
+        --generate-ssh-keys `
+        --vnet-name $VNET_NAME `
+        --subnet $VM_SUBNET `
+        --public-ip-address "" `
+        --nsg "" | Out-Null
+    LogOk "VM created: $VM_NAME"
+}
+else {
+    LogWarn "VM $VM_NAME already exists. Reusing existing VM."
+}
 
 # Enable IP forwarding on Azure NIC (required for DNAT to work)
 $VM_NIC_ID = az vm show `
@@ -382,15 +541,19 @@ $iptablesScript = @"
 set -e
 
 # Enable IP forwarding at kernel level
-echo 'net.ipv4.ip_forward=1' | tee -a /etc/sysctl.conf
+grep -q '^net.ipv4.ip_forward=1$' /etc/sysctl.conf || echo 'net.ipv4.ip_forward=1' | tee -a /etc/sysctl.conf
 sysctl -p
 
 # DNAT: redirect HTTPS inbound to APIM Private Endpoint IP
+iptables -t nat -C PREROUTING -p tcp --dport 443 -j DNAT --to-destination $($APIM_PE_IP):443 2>/dev/null || \
 iptables -t nat -A PREROUTING -p tcp --dport 443 -j DNAT --to-destination $($APIM_PE_IP):443
-iptables -t nat -A POSTROUTING -j MASQUERADE
+iptables -t nat -C POSTROUTING -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -j MASQUERADE
 
 # Persist rules across reboots
-DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent
+if ! dpkg -s iptables-persistent >/dev/null 2>&1; then
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent
+fi
 netfilter-persistent save
 
 echo '--- iptables NAT table ---'
@@ -405,7 +568,7 @@ $runResult = az vm run-command invoke `
     --resource-group $RG `
     --name $VM_NAME `
     --command-id RunShellScript `
-    --scripts @$iptablesFile `
+    --scripts "@$iptablesFile" `
     --query "value[0].message" -o tsv
 
 Write-Host "  VM script output:" -ForegroundColor Gray
@@ -470,11 +633,17 @@ LogOk "PLS destination: VM $VM_PRIVATE_IP (not PE IP — PLS limitation respecte
 Log "=== STEP 9: Fabric Managed Private Endpoint ==="
 # =============================================================================
 
-$FABRIC_TOKEN = az account get-access-token `
-    --resource https://api.fabric.microsoft.com --query "accessToken" -o tsv
+$FABRIC_TOKEN = GetFabricToken
 
-$mpeFile = "$env:TEMP\fabric-mpe.json"
-WriteJson $mpeFile @"
+$existingMpe = GetFabricManagedPrivateEndpointByName $FABRIC_WS_ID $MPE_NAME $FABRIC_TOKEN
+
+if ($existingMpe) {
+    $MPE_ID = $existingMpe.id
+    LogWarn "Managed private endpoint $MPE_NAME already exists. Reusing existing endpoint $MPE_ID."
+}
+else {
+    $mpeFile = "$env:TEMP\fabric-mpe.json"
+    WriteJson $mpeFile @"
 {
   "name": "$MPE_NAME",
   "targetPrivateLinkResourceId": "$PLS_ID",
@@ -483,15 +652,17 @@ WriteJson $mpeFile @"
 }
 "@
 
-$mpeResponse = Invoke-RestMethod `
-    -Method POST `
-    -Uri "https://api.fabric.microsoft.com/v1/workspaces/$FABRIC_WS_ID/managedPrivateEndpoints" `
-    -Headers @{ "Authorization" = "Bearer $FABRIC_TOKEN"; "Content-Type" = "application/json" } `
-    -Body (Get-Content $mpeFile -Raw)
+    $mpeResponse = Invoke-RestMethod `
+        -Method POST `
+        -Uri "https://api.fabric.microsoft.com/v1/workspaces/$FABRIC_WS_ID/managedPrivateEndpoints" `
+        -Headers @{ "Authorization" = "Bearer $FABRIC_TOKEN"; "Content-Type" = "application/json" } `
+        -Body (Get-Content $mpeFile -Raw)
 
-$MPE_ID = $mpeResponse.id
-LogOk "MPE created: $MPE_ID"
-Start-Sleep -Seconds 30
+    $MPE_ID = $mpeResponse.id
+    if (-not $MPE_ID) { LogError "Fabric did not return a managed private endpoint id." }
+    LogOk "MPE created: $MPE_ID"
+    Start-Sleep -Seconds 30
+}
 
 # =============================================================================
 Log "=== STEP 10: Approve PLS Connection ==="
@@ -501,11 +672,11 @@ $PENDING_CONN = $null
 $retries = 0
 
 while (-not $PENDING_CONN -and $retries -lt 10) {
-    $PENDING_CONN = az network private-link-service show `
+    $PENDING_CONN = @(az network private-link-service show `
         --resource-group $RG `
         --name $PLS_NAME `
         --query "privateEndpointConnections[?privateLinkServiceConnectionState.status=='Pending'].name" `
-        -o tsv
+        -o tsv)[0]
     if (-not $PENDING_CONN) {
         Write-Host "  No pending connection yet, retrying in 30s ..."
         Start-Sleep -Seconds 30
@@ -513,33 +684,42 @@ while (-not $PENDING_CONN -and $retries -lt 10) {
     }
 }
 
-if (-not $PENDING_CONN) { LogError "No pending PLS connection found after retries." }
-LogOk "Pending connection: $PENDING_CONN"
+if ($PENDING_CONN) {
+    LogOk "Pending connection: $PENDING_CONN"
 
-az network private-link-service connection update `
-    --resource-group $RG `
-    --service-name $PLS_NAME `
-    --name $PENDING_CONN `
-    --connection-status Approved | Out-Null
-LogOk "PLS connection approved."
+    az network private-link-service connection update `
+        --resource-group $RG `
+        --service-name $PLS_NAME `
+        --name $PENDING_CONN `
+        --connection-status Approved | Out-Null
+    LogOk "PLS connection approved."
+}
+else {
+    $FABRIC_TOKEN = GetFabricToken
+    $mpe = GetFabricManagedPrivateEndpointById $FABRIC_WS_ID $MPE_ID $FABRIC_TOKEN
+    if ($mpe.provisioningState -eq "Succeeded" -or $mpe.connectionState.status -eq "Approved") {
+        LogWarn "No pending PLS connection found. The Fabric managed private endpoint appears to be approved already."
+    }
+    else {
+        LogError "No pending PLS connection found after retries."
+    }
+}
 
 # =============================================================================
 Log "=== STEP 11: Wait for MPE Succeeded ==="
 # =============================================================================
 
-while ($true) {
-    $FABRIC_TOKEN = az account get-access-token `
-        --resource https://api.fabric.microsoft.com --query "accessToken" -o tsv
+for ($attempt = 1; $attempt -le 60; $attempt++) {
+    $FABRIC_TOKEN = GetFabricToken
 
-    $mpe = Invoke-RestMethod `
-        -Method GET `
-        -Uri "https://api.fabric.microsoft.com/v1/workspaces/$FABRIC_WS_ID/managedPrivateEndpoints/$MPE_ID" `
-        -Headers @{ "Authorization" = "Bearer $FABRIC_TOKEN" }
+    $mpe = GetFabricManagedPrivateEndpointById $FABRIC_WS_ID $MPE_ID $FABRIC_TOKEN
 
     Write-Host "  $(Get-Date -Format 'HH:mm:ss')  provisioningState: $($mpe.provisioningState)  |  connectionState: $($mpe.connectionState.status)"
 
     if ($mpe.provisioningState -eq "Succeeded") { break }
     if ($mpe.provisioningState -eq "Failed")    { LogError "MPE provisioning failed." }
+    if ($mpe.connectionState.status -eq "Rejected") { LogError "MPE connection was rejected." }
+    if ($attempt -eq 60) { LogError "MPE did not reach Succeeded within the allotted time." }
 
     Start-Sleep -Seconds 60
 }
