@@ -2,8 +2,6 @@
 # Fabric OAP -> APIM Private Connectivity Setup
 # Pattern: Fabric MPE -> PLS Direct Connect -> Linux VM -> APIM Standard v2
 #          (PE inbound + VNet Integration outbound)
-# Region:  East US 2
-# Cost:    ~CAD$935/month vs ~CAD$3,000/month for Premium
 #
 # PREREQUISITES
 #   - Azure CLI installed and logged in: az login
@@ -566,8 +564,5 @@ Write-Host "  APIM              : $APIM_NAME (Standard v2)"                     
 Write-Host "  APIM PE IP        : $APIM_PE_IP"                                    -ForegroundColor White
 Write-Host "  APIM Endpoint     : https://$APIM_NAME.azure-api.net"               -ForegroundColor White
 Write-Host "  Connection State  : $($mpe.connectionState.status)"                 -ForegroundColor Green
-Write-Host ""
-Write-Host "  Estimated cost    : ~CAD`$935/month (APIM Standard v2 + VM)"        -ForegroundColor Yellow
-Write-Host "  vs Premium        : ~CAD`$3,000/month (APIM Premium)"               -ForegroundColor Yellow
 Write-Host ""
 LogOk "Call APIM from Fabric notebooks using: https://$APIM_NAME.azure-api.net"
