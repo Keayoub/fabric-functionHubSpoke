@@ -1,28 +1,70 @@
-# =============================================================================
-# Fabric OAP -> APIM Private Connectivity Setup
-# Pattern: Fabric MPE -> PLS Direct Connect -> Linux VM -> APIM Standard v2
-#          (PE inbound + VNet Integration outbound)
-#
-# PREREQUISITES
-#   - Azure CLI installed and logged in: az login
-#   - Fabric workspace with OAP enabled
-#   - Contributor permissions on the subscription
-#   - PLS Direct Connect feature flag registered:
-#       az feature register --namespace Microsoft.Network \
-#         --name AllowPrivateLinkserviceUDR
-#
-# BEFORE RUNNING — update the CONFIGURATION section below:
-#   1. $RG              — your resource group name
-#   2. $LOCATION        — must match your Fabric capacity region
-#   3. $APIM_NAME       — globally unique APIM name
-#   4. $PUBLISHER_EMAIL — your email
-#   5. $PUBLISHER_NAME  — your organisation name
-#   6. $FABRIC_WS_ID    — your Fabric workspace ID
-#                         (from browser URL: app.fabric.microsoft.com/groups/{workspace-id})
-#
-# USAGE
-#   .\fabric-apim-stdv2-pls.ps1
-# =============================================================================
+<#
+.SYNOPSIS
+    Provisions end-to-end private connectivity from Microsoft Fabric OAP to APIM Standard v2.
+
+.DESCRIPTION
+    Automates the following Azure infrastructure deployment:
+
+      Fabric OAP -> Managed Private Endpoint (MPE)
+        -> Private Link Service (PLS Direct Connect)
+        -> Linux VM (iptables DNAT forwarder)
+        -> APIM Private Endpoint (inbound)
+        -> APIM Standard v2 (VNet Integration outbound)
+
+    All provisioning steps are rerun-safe: existing resources are detected and
+    reused rather than duplicated.
+
+    PREREQUISITES
+      - Azure CLI installed and logged in:  az login
+      - Fabric workspace with OAP enabled
+      - Contributor permissions on the target subscription
+      - PLS Direct Connect feature flag registered:
+          az feature register --namespace Microsoft.Network --name AllowPrivateLinkserviceUDR
+        If the flag is not registered yet, run -ValidateOnly first — it will
+        tell you the current state and stop before creating any resources.
+
+.PARAMETER ValidateOnly
+    Runs only the prerequisite checks (Azure CLI login, feature flag registration,
+    Fabric workspace API access, and config placeholder detection) and exits without
+    creating any Azure or Fabric resources. Use this before the first full run.
+
+.PARAMETER FabricWorkspaceId
+    GUID of the Fabric workspace that will host the Managed Private Endpoint.
+    Find it in the browser URL: https://app.fabric.microsoft.com/groups/{workspace-id}
+    Overrides the $FABRIC_WS_ID value set inside the CONFIGURATION section.
+
+.PARAMETER PublisherEmail
+    Email address used when creating the APIM instance (required by Azure).
+    Overrides the $PUBLISHER_EMAIL value set inside the CONFIGURATION section.
+
+.PARAMETER PublisherName
+    Organisation name used when creating the APIM instance.
+    Overrides the $PUBLISHER_NAME value set inside the CONFIGURATION section.
+
+.EXAMPLE
+    # Run preflight checks only — no Azure resources are created.
+    .\fabric-apim-stdv2-pls.ps1 -ValidateOnly `
+        -FabricWorkspaceId "fb53fbfb-d8e9-4797-b2f5-ba80bb9a7388" `
+        -PublisherEmail "ops@contoso.com" `
+        -PublisherName "Contoso"
+
+.EXAMPLE
+    # Full deployment. Uses parameters to avoid editing the script directly.
+    .\fabric-apim-stdv2-pls.ps1 `
+        -FabricWorkspaceId "fb53fbfb-d8e9-4797-b2f5-ba80bb9a7388" `
+        -PublisherEmail "ops@contoso.com" `
+        -PublisherName "Contoso"
+
+.EXAMPLE
+    # Full deployment when all values are already set in the CONFIGURATION section.
+    .\fabric-apim-stdv2-pls.ps1
+
+.NOTES
+    To view this help:
+        Get-Help .\fabric-apim-stdv2-pls.ps1
+        Get-Help .\fabric-apim-stdv2-pls.ps1 -Full
+        Get-Help .\fabric-apim-stdv2-pls.ps1 -Examples
+#>
 
 param(
     [switch]$ValidateOnly,
