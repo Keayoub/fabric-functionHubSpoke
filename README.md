@@ -37,7 +37,34 @@ Workspace           Workspace
 ✅ **Flexible Audience**: Accepts both `api://CLIENT_ID` and `CLIENT_ID` token formats  
 ✅ **Enterprise Security**: JWT validation with JWKS caching + key rotation support  
 
-## 📁 Project Structure
+## � On-Behalf-Of (OBO) Flow Explained
+
+This Function App uses the **OAuth 2.0 On-Behalf-Of (OBO) flow** to maintain user context when accessing Azure resources:
+
+**How it works:**
+1. **User/MSI → Function**: Caller authenticates with their identity and sends JWT to Function
+2. **Function validates JWT**: Verifies the caller's identity and checks authorization
+3. **Function → Entra ID**: Uses Service Principal credentials + caller's JWT to request a new token via OBO
+4. **Entra ID → Function**: Returns token with **original caller's identity** (not SP identity)
+5. **Function → Caller**: Returns token that maintains user context for downstream API calls
+
+**Why OBO matters:**
+- ✅ **Audit trail preserved**: Azure SQL/Power BI logs show the actual user, not the SP
+- ✅ **User-level permissions**: Access is limited by the user's own permissions, not the SP's
+- ✅ **Compliance**: Meets regulatory requirements for identity tracking
+- ✅ **Security**: No elevation of privilege beyond what user already has
+
+**Delegated vs Application Permissions:**
+- **Delegated permissions** (OBO) = Act on behalf of the user → Used by this project
+- **Application permissions** (Client Credentials) = Act as the app itself → Used for pipeline/MSI callers
+
+**Configured OBO Permissions:**
+The setup script automatically configures these **delegated** permissions:
+- `Azure SQL Database` → `user_impersonation`
+- `Azure Management API` → `user_impersonation`
+- `Power BI Service` → `Dataset.Read/Write.All`, `Workspace.Read/Write.All`
+
+## �📁 Project Structure
 
 ```
 fabric-functionHubSpoke/
@@ -152,24 +179,64 @@ az role assignment create `
   --scope $KV_SCOPE
 ```
 
-### Step 5: Store SP Credentials in Key Vault
+### Step 5: Create Service Principal with OBO Permissions
 
-Store your Service Principal credentials in Key Vault:
+Use the **automated setup script** to create a Service Principal with all required OBO (On-Behalf-Of) permissions:
 
 ```powershell
-# Add SP credentials
+.\scripts\setup_sp_keyvault.ps1 `
+  -KeyVaultUrl "https://$KEY_VAULT.vault.azure.net/" `
+  -ServicePrincipalName "fabric-hub-spoke-sp" `
+  -TenantId $TENANT_ID
+```
+
+**What this script does:**
+- ✅ Creates Service Principal with Contributor role
+- ✅ Configures **delegated OBO permissions** for:
+  - Azure SQL Database (`user_impersonation`)
+  - Azure Management API (`user_impersonation`)
+  - Power BI/Fabric API (`Dataset.Read/Write.All`, `Workspace.Read/Write.All`)
+- ✅ Grants admin consent automatically
+- ✅ Stores SP credentials in Key Vault (`sp-client-id`, `sp-client-secret`, `sp-tenant-id`)
+- ✅ Grants Key Vault RBAC access to the SP
+
+**Manual alternative** (if you prefer manual setup):
+
+```powershell
+# Create SP manually
+az ad sp create-for-rbac --name "fabric-hub-spoke-sp"
+
+# Then add API permissions in Azure Portal:
+# Entra ID → App registrations → fabric-hub-spoke-sp → API permissions
+# Add these DELEGATED permissions:
+#   - Azure SQL Database: user_impersonation
+#   - Azure Service Management: user_impersonation  
+#   - Power BI Service: Dataset.Read.All, Dataset.ReadWrite.All, Workspace.Read.All, Workspace.ReadWrite.All
+# Then: Grant admin consent
+
+# Store credentials
 az keyvault secret set --vault-name $KEY_VAULT --name "sp-client-id" --value "<your-sp-client-id>"
 az keyvault secret set --vault-name $KEY_VAULT --name "sp-client-secret" --value "<your-sp-client-secret>"
 az keyvault secret set --vault-name $KEY_VAULT --name "sp-tenant-id" --value "<your-sp-tenant-id>"
+```
 
-# Whitelist Fabric workspace MSI OIDs (JSON array format)
+### Step 6: Whitelist Fabric Workspace MSI
+
+Add allowed workspace MSI OIDs to Key Vault:
+
+```powershell
 # Find OID: Fabric Workspace → Settings → License info → Workspace identity
 az keyvault secret set --vault-name $KEY_VAULT --name "allowed-msi-oids" --value '["<workspace-msi-oid-1>", "<workspace-msi-oid-2>"]'
 ```
 
-> **Note**: The SP must have appropriate permissions on target Azure resources (e.g., `db_datareader` on SQL databases, Reader/Contributor on subscriptions, etc.)
+> **Note**: For Azure SQL access, you must also grant database-level permissions to the SP:
+> ```sql
+> CREATE USER [fabric-hub-spoke-sp] FROM EXTERNAL PROVIDER;
+> ALTER ROLE db_datareader ADD MEMBER [fabric-hub-spoke-sp];
+> ALTER ROLE db_datawriter ADD MEMBER [fabric-hub-spoke-sp];
+> ```
 
-### Step 6: Deploy Function Code
+### Step 7: Deploy Function Code
 
 Use the included deployment script which bundles dependencies locally:
 
@@ -184,7 +251,7 @@ Or deploy manually using Azure Functions Core Tools:
 func azure functionapp publish $FUNCTION_APP --no-build --python
 ```
 
-### Step 7: Create Managed Private Endpoint (MPE)
+### Step 8: Create Managed Private Endpoint (MPE)
 
 For Fabric notebooks to reach the Function App:
 
@@ -195,7 +262,7 @@ For Fabric notebooks to reach the Function App:
    - Resource: Select your Function App (`$FUNCTION_APP`)
 3. **Approve the MPE** in Azure Portal (if required by your policies)
 
-### Step 8: Verify Deployment
+### Step 9: Verify Deployment
 
 Test the health endpoint:
 

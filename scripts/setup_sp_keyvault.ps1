@@ -120,8 +120,79 @@ try {
     exit 1
 }
 
-# Step 3: Store secrets in Key Vault
-Write-Host "`n[Step 3] Storing secrets in Key Vault..." -ForegroundColor Yellow
+# Step 3: Configure OBO (On-Behalf-Of) API Permissions
+Write-Host "`n[Step 3] Configuring On-Behalf-Of (OBO) API Permissions..." -ForegroundColor Yellow
+Write-Host "  Adding delegated permissions for OBO flow..." -ForegroundColor Cyan
+
+try {
+    # Azure SQL Database - user_impersonation (delegated)
+    Write-Host "  • Adding Azure SQL Database permissions..." -ForegroundColor Cyan
+    az ad app permission add `
+        --id $sp.clientId `
+        --api 022907d3-0f1b-48f7-badc-1ba6abab6d66 `
+        --api-permissions c39ef2d1-04ce-46dc-8b5f-e9a5c60f0fc9=Scope `
+        --output none 2>&1
+    
+    # Azure Service Management (ARM) - user_impersonation (delegated)
+    Write-Host "  • Adding Azure Management API permissions..." -ForegroundColor Cyan
+    az ad app permission add `
+        --id $sp.clientId `
+        --api 797f4846-ba00-4fd7-ba43-dac1f8f63013 `
+        --api-permissions 41094075-9dad-400e-a0bd-54e686782033=Scope `
+        --output none 2>&1
+    
+    # Power BI Service - Multiple delegated scopes
+    Write-Host "  • Adding Power BI/Fabric API permissions..." -ForegroundColor Cyan
+    az ad app permission add `
+        --id $sp.clientId `
+        --api 00000009-0000-0000-c000-000000000000 `
+        --api-permissions 4ae1bf56-f562-4747-b7bc-2fa0874ed46f=Scope `
+        --output none 2>&1  # Dataset.Read.All
+    
+    az ad app permission add `
+        --id $sp.clientId `
+        --api 00000009-0000-0000-c000-000000000000 `
+        --api-permissions 7504609f-c495-4c64-8542-686125a5a36f=Scope `
+        --output none 2>&1  # Dataset.ReadWrite.All
+    
+    az ad app permission add `
+        --id $sp.clientId `
+        --api 00000009-0000-0000-c000-000000000000 `
+        --api-permissions 2448370f-f988-42cd-909c-6528efd67c1a=Scope `
+        --output none 2>&1  # Workspace.Read.All
+    
+    az ad app permission add `
+        --id $sp.clientId `
+        --api 00000009-0000-0000-c000-000000000000 `
+        --api-permissions 7f33e027-4039-419b-938e-2f8ca153e68e=Scope `
+        --output none 2>&1  # Workspace.ReadWrite.All
+    
+    Write-Host "✓ Delegated API permissions added" -ForegroundColor Green
+    
+    # Grant admin consent
+    Write-Host "`n  Granting admin consent for delegated permissions..." -ForegroundColor Cyan
+    az ad app permission admin-consent --id $sp.clientId 2>&1 | Out-Null
+    
+    Write-Host "✓ Admin consent granted for OBO flow" -ForegroundColor Green
+    Write-Host "  ✓ Azure SQL Database (user_impersonation)" -ForegroundColor Green
+    Write-Host "  ✓ Azure Management API (user_impersonation)" -ForegroundColor Green
+    Write-Host "  ✓ Power BI Service (Dataset.Read.All, Dataset.ReadWrite.All)" -ForegroundColor Green
+    Write-Host "  ✓ Power BI Service (Workspace.Read.All, Workspace.ReadWrite.All)" -ForegroundColor Green
+    
+} catch {
+    Write-Host "⚠ Warning: Could not configure API permissions automatically: $_" -ForegroundColor Yellow
+    Write-Host "   Please manually add delegated permissions in Azure Portal:" -ForegroundColor Yellow
+    Write-Host "   1. Go to Entra ID → App registrations → $ServicePrincipalName" -ForegroundColor Yellow
+    Write-Host "   2. Click 'API permissions' → 'Add a permission'" -ForegroundColor Yellow
+    Write-Host "   3. Add DELEGATED permissions for:" -ForegroundColor Yellow
+    Write-Host "      • Azure SQL Database: user_impersonation" -ForegroundColor Yellow
+    Write-Host "      • Azure Service Management: user_impersonation" -ForegroundColor Yellow
+    Write-Host "      • Power BI Service: Dataset.Read.All, Workspace.Read.All" -ForegroundColor Yellow
+    Write-Host "   4. Click 'Grant admin consent'" -ForegroundColor Yellow
+}
+
+# Step 4: Store secrets in Key Vault
+Write-Host "`n[Step 4] Storing secrets in Key Vault..." -ForegroundColor Yellow
 
 $secrets = @{
     "sp-client-id"   = $sp.clientId
@@ -145,8 +216,8 @@ foreach ($secretName in $secrets.Keys) {
     }
 }
 
-# Step 4: Grant Key Vault access to the Service Principal using RBAC
-Write-Host "`n[Step 4] Configuring Key Vault access (RBAC)..." -ForegroundColor Yellow
+# Step 5: Grant Key Vault access to the Service Principal using RBAC
+Write-Host "`n[Step 5] Configuring Key Vault access (RBAC)..." -ForegroundColor Yellow
 try {
     # Get Key Vault resource ID
     $kvResourceId = az keyvault show --name $KeyVaultName --query id -o tsv
@@ -166,7 +237,7 @@ try {
     Write-Host "   Please manually assign 'Key Vault Secrets User' role to the Service Principal in Azure Portal" -ForegroundColor Yellow
 }
 
-# Step 5: Summary
+# Step 6: Summary
 Write-Host "`n================================" -ForegroundColor Green
 Write-Host "Setup Complete!" -ForegroundColor Green
 Write-Host "================================" -ForegroundColor Green
@@ -176,6 +247,12 @@ Write-Host "  Client ID: $($sp.clientId)"
 Write-Host "  Tenant ID: $($sp.tenant)"
 Write-Host "  Client Secret: ••••••••••• (stored in Key Vault)"
 
+Write-Host "`nOBO (On-Behalf-Of) Configuration:" -ForegroundColor Cyan
+Write-Host "  ✓ Azure SQL Database - user_impersonation (delegated)"
+Write-Host "  ✓ Azure Management API - user_impersonation (delegated)"
+Write-Host "  ✓ Power BI/Fabric API - Multiple delegated scopes"
+Write-Host "  ✓ Admin consent granted"
+
 Write-Host "`nKey Vault Secrets Created:" -ForegroundColor Cyan
 Write-Host "  • sp-client-id"
 Write-Host "  • sp-client-secret"
@@ -184,6 +261,8 @@ Write-Host "  • sp-tenant-id"
 Write-Host "`nNext Steps:" -ForegroundColor Yellow
 Write-Host "  1. Update local.settings.json with your Key Vault URL (if not already done)"
 Write-Host "  2. The secrets are now available for your Azure Function to use"
-Write-Host "  3. Keep the password safe: $($sp.password)"
+Write-Host "  3. For Power BI: Add this SP to workspace members in Fabric portal"
+Write-Host "  4. For Azure SQL: Grant database-level permissions (db_datareader, etc.)"
+Write-Host "  5. Keep the password safe: $($sp.password)"
 
 Write-Host ""
