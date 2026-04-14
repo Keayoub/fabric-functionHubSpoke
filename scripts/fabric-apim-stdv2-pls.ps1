@@ -44,16 +44,16 @@
 .EXAMPLE
     # Run preflight checks only — no Azure resources are created.
     .\fabric-apim-stdv2-pls.ps1 -ValidateOnly `
-        -FabricWorkspaceId "fb53fbfb-d8e9-4797-b2f5-ba80bb9a7388" `
-        -PublisherEmail "ops@contoso.com" `
-        -PublisherName "Contoso"
+        -FabricWorkspaceId "<your-fabric-workspace-id>" `
+        -PublisherEmail "<your-email>" `
+        -PublisherName "<your-org>"
 
 .EXAMPLE
     # Full deployment. Uses parameters to avoid editing the script directly.
     .\fabric-apim-stdv2-pls.ps1 `
-        -FabricWorkspaceId "fb53fbfb-d8e9-4797-b2f5-ba80bb9a7388" `
-        -PublisherEmail "ops@contoso.com" `
-        -PublisherName "Contoso"
+        -FabricWorkspaceId "<your-fabric-workspace-id>" `
+        -PublisherEmail "<your-email>" `
+        -PublisherName "<your-org>"
 
 .EXAMPLE
     # Full deployment when all values are already set in the CONFIGURATION section.

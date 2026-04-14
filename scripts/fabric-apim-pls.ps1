@@ -26,7 +26,7 @@ $PIP_NAME            = "pip-apim"
 $PLS_NAME            = "pls-apim-directconnect"
 
 # Fabric
-$FABRIC_WS_ID        = "fb53fbfb-d8e9-4797-b2f5-ba80bb9a7388"   # WS-HUB-OAP
+$FABRIC_WS_ID        = "<your-fabric-workspace-id>"   # WS-HUB-OAP
 $MPE_NAME            = "mpe-apim"
 
 #endregion

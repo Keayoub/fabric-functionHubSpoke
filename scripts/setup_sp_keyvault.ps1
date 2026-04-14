@@ -22,7 +22,7 @@ param(
     [string]$ServicePrincipalName = "fabric-hub-spoke-sp",
     
     [Parameter(Mandatory = $false)]
-    [string]$TenantId = "c869cf92-11d8-4fbc-a7cf-6114d160dd71"
+    [string]$TenantId = "<your-entra-tenant-id>"
 )
 
 Write-Host "================================" -ForegroundColor Cyan
