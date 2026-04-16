@@ -18,6 +18,20 @@
     All provisioning steps are rerun-safe: existing resources are detected and
     reused rather than duplicated.
 
+    TOPOLOGY — TESTING vs PRODUCTION
+      This script deploys a single Linux VM behind the Internal Load Balancer.
+      That is sufficient for testing and POC purposes.
+
+      For PRODUCTION you should:
+        - Deploy at least 2 Linux forwarder VMs (in separate Availability Zones
+          if the region supports them) and add them all to the LB backend pool.
+        - The Azure Standard Load Balancer SLA only covers deployments with
+          >= 2 healthy backend instances; a single-VM backend has no SLA.
+        - Use health probes (already configured on port 443) so the LB
+          automatically removes unhealthy VMs from rotation.
+        - Consider using a VM Scale Set (VMSS) for auto-scaling the forwarder
+          tier under sustained load.
+
     PREREQUISITES
       - Azure CLI installed and logged in:  az login
       - Fabric workspace with OAP enabled
@@ -111,6 +125,11 @@ $APIM_INT_PREFIX     = "10.10.4.0/24"   # APIM VNet Integration (outbound)
 $NSG_VM_NAME         = "nsg-vm"
 
 # Linux VM (IP forwarder)
+# TESTING  : 1 VM is fine for POC / functional validation.
+# PRODUCTION: Add vm-pls-forwarder-02, vm-pls-forwarder-03, ... and register
+#             each NIC in the $LB_BACKEND_NAME pool so the Internal Load
+#             Balancer spreads traffic across all healthy instances.
+#             Deploy VMs across Availability Zones for zone-redundancy.
 $VM_NAME             = "vm-pls-forwarder"
 $VM_SIZE             = "Standard_B2s"
 $VM_ADMIN            = "azureuser"
@@ -535,6 +554,18 @@ LogOk "Private DNS zone $PE_DNS_ZONE linked"
 # =============================================================================
 Log "=== STEP 7: Linux VM (IP forwarder — Load Balancer backend) ==="
 # =============================================================================
+# NOTE — TESTING vs PRODUCTION
+#   This step provisions a SINGLE forwarder VM. For a POC or functional test
+#   that is perfectly fine.
+#
+#   For PRODUCTION, repeat this step (and the NIC backend-pool assignment in
+#   Step 8) for each additional VM you want to add. A minimum of 2 VMs in
+#   separate Availability Zones is strongly recommended to:
+#     - Eliminate the single point of failure
+#     - Satisfy the Azure Standard Load Balancer SLA (requires >= 2 healthy
+#       backend instances per pool)
+#     - Survive a VM reboot / patch cycle without dropping Fabric traffic
+# =============================================================================
 
 Log "Deploying Linux VM $VM_NAME (~3 min) ..."
 
@@ -621,6 +652,22 @@ LogOk "iptables DNAT configured on VM"
 
 # =============================================================================
 Log "=== STEP 8: Internal Load Balancer for Standard PLS ==="
+# =============================================================================
+# The Internal Standard Load Balancer is the mandatory front-end for a
+# standard Private Link Service.
+#
+# TESTING  : 1 VM in the backend pool — functional, but no redundancy.
+# PRODUCTION scaling options:
+#   Option A — Multiple individual VMs
+#     Add each additional forwarder VM NIC to $LB_BACKEND_NAME.
+#     Spread VMs across Availability Zones (--zone 1, 2, 3 on az vm create).
+#   Option B — VM Scale Set (VMSS)
+#     Replace the single VM with a VMSS and attach the scale set to the
+#     backend pool. The LB health probe (port 443, configured below) will
+#     automatically route around unhealthy instances.
+#   Option C — Zone-redundant LB frontend
+#     When creating the LB omit --zone to get a zone-redundant frontend IP,
+#     ensuring the LB itself survives an Availability Zone failure.
 # =============================================================================
 
 $PLS_SUBNET_ID = az network vnet subnet show `
