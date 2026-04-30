@@ -53,8 +53,10 @@
 
 .PARAMETER EnableAutoscale
     Optional switch to configure Azure Monitor autoscale for the VMSS forwarder tier.
-    When enabled, the script creates or updates autoscale settings with CPU-based
-    rules (scale out above 70 percent, scale in below 30 percent).
+        When enabled, the script creates or updates autoscale settings with combined
+        Network Out and CPU rules:
+            - Scale out when Network Out is high OR CPU is high
+            - Scale in when Network Out is low AND CPU is low
 
 .EXAMPLE
     # Run preflight checks only — no Azure resources are created.
@@ -138,8 +140,16 @@ $VMSS_AUTOSCALE_NAME         = "$VMSS_NAME-autoscale"
 $VMSS_AUTOSCALE_MIN          = 2
 $VMSS_AUTOSCALE_MAX          = 6
 $VMSS_AUTOSCALE_DEFAULT      = 2
+$VMSS_SCALE_OUT_NETWORK_OUT_MBPS = 500
+$VMSS_SCALE_IN_NETWORK_OUT_MBPS  = 100
 $VMSS_SCALE_OUT_CPU_PERCENT  = 70
 $VMSS_SCALE_IN_CPU_PERCENT   = 30
+$VMSS_SCALE_OUT_DURATION     = "5m"
+$VMSS_SCALE_IN_DURATION      = "10m"
+
+# Azure autoscale Network Out Total threshold uses bytes per minute.
+$VMSS_SCALE_OUT_NETWORK_OUT_BYTES_PER_MIN = [int64]($VMSS_SCALE_OUT_NETWORK_OUT_MBPS * 125000 * 60)
+$VMSS_SCALE_IN_NETWORK_OUT_BYTES_PER_MIN  = [int64]($VMSS_SCALE_IN_NETWORK_OUT_MBPS * 125000 * 60)
 
 # Internal Load Balancer (for standard PLS)
 $LB_NAME             = "lb-apim-internal"
@@ -665,19 +675,39 @@ if ($EnableAutoscale) {
         }
     }
 
+    # Azure autoscale behavior across multiple rules:
+    # - Scale out evaluates as OR across scale-out rules.
+    # - Scale in evaluates as AND across scale-in rules.
+
+    # Scale out rule 1: high network throughput.
     az monitor autoscale rule create `
         --resource-group $RG `
         --autoscale-name $VMSS_AUTOSCALE_NAME `
-        --condition "Percentage CPU > $VMSS_SCALE_OUT_CPU_PERCENT avg 10m" `
+        --condition "Network Out Total > $VMSS_SCALE_OUT_NETWORK_OUT_BYTES_PER_MIN avg $VMSS_SCALE_OUT_DURATION" `
         --scale out 1 | Out-Null
 
+    # Scale out rule 2: high CPU.
     az monitor autoscale rule create `
         --resource-group $RG `
         --autoscale-name $VMSS_AUTOSCALE_NAME `
-        --condition "Percentage CPU < $VMSS_SCALE_IN_CPU_PERCENT avg 10m" `
+        --condition "Percentage CPU > $VMSS_SCALE_OUT_CPU_PERCENT avg $VMSS_SCALE_OUT_DURATION" `
+        --scale out 1 | Out-Null
+
+    # Scale in rule 1: low network throughput.
+    az monitor autoscale rule create `
+        --resource-group $RG `
+        --autoscale-name $VMSS_AUTOSCALE_NAME `
+        --condition "Network Out Total < $VMSS_SCALE_IN_NETWORK_OUT_BYTES_PER_MIN avg $VMSS_SCALE_IN_DURATION" `
         --scale in 1 | Out-Null
 
-    $VMSS_AUTOSCALE_STATUS = "Enabled ($VMSS_AUTOSCALE_MIN-$VMSS_AUTOSCALE_MAX, CPU out>$VMSS_SCALE_OUT_CPU_PERCENT in<$VMSS_SCALE_IN_CPU_PERCENT)"
+    # Scale in rule 2: low CPU.
+    az monitor autoscale rule create `
+        --resource-group $RG `
+        --autoscale-name $VMSS_AUTOSCALE_NAME `
+        --condition "Percentage CPU < $VMSS_SCALE_IN_CPU_PERCENT avg $VMSS_SCALE_IN_DURATION" `
+        --scale in 1 | Out-Null
+
+    $VMSS_AUTOSCALE_STATUS = "Enabled ($VMSS_AUTOSCALE_MIN-$VMSS_AUTOSCALE_MAX, out: NetworkOut>$VMSS_SCALE_OUT_NETWORK_OUT_MBPS Mbps OR CPU>$VMSS_SCALE_OUT_CPU_PERCENT% for $VMSS_SCALE_OUT_DURATION; in: NetworkOut<$VMSS_SCALE_IN_NETWORK_OUT_MBPS Mbps AND CPU<$VMSS_SCALE_IN_CPU_PERCENT% for $VMSS_SCALE_IN_DURATION)"
     LogOk "Autoscale configured for VMSS"
 }
 
