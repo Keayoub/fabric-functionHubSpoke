@@ -611,28 +611,38 @@ LogOk "VM private IP (Load Balancer backend): $VM_PRIVATE_IP"
 # All HTTPS traffic arriving at VM port 443 is forwarded to APIM PE IP
 Log "Configuring iptables DNAT: VM:443 -> APIM PE $APIM_PE_IP:443 ..."
 
+$setupIptablesTemplate = Join-Path $PSScriptRoot "setup-iptables.sh"
+if (-not (Test-Path $setupIptablesTemplate)) {
+    LogError "Missing setup script template: $setupIptablesTemplate"
+}
+
+$setupIptablesContent = (Get-Content -Path $setupIptablesTemplate -Raw).Replace("__APIM_PE_IP__", $APIM_PE_IP)
+
 $iptablesScript = @"
-#!/bin/bash
-set -e
+cat > /usr/local/bin/setup-iptables.sh << 'SCRIPT'
+$setupIptablesContent
+SCRIPT
 
-# Enable IP forwarding at kernel level
-grep -q '^net.ipv4.ip_forward=1$' /etc/sysctl.conf || echo 'net.ipv4.ip_forward=1' | tee -a /etc/sysctl.conf
-sysctl -p
+chmod +x /usr/local/bin/setup-iptables.sh
+/usr/local/bin/setup-iptables.sh
 
-# DNAT: redirect HTTPS inbound to APIM Private Endpoint IP
-iptables -t nat -C PREROUTING -p tcp --dport 443 -j DNAT --to-destination $($APIM_PE_IP):443 2>/dev/null || \
-iptables -t nat -A PREROUTING -p tcp --dport 443 -j DNAT --to-destination $($APIM_PE_IP):443
-iptables -t nat -C POSTROUTING -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -j MASQUERADE
+# Persist rules across reboots using systemd (no package dependency)
+cat > /etc/systemd/system/iptables-dnat.service << 'UNIT'
+[Unit]
+Description=iptables DNAT forwarder for APIM PE
+After=network.target
 
-# Persist rules across reboots
-if ! dpkg -s iptables-persistent >/dev/null 2>&1; then
-    apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent
-fi
-netfilter-persistent save
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/setup-iptables.sh
+RemainAfterExit=yes
 
-echo '--- iptables NAT table ---'
-iptables -t nat -L -n -v
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable iptables-dnat.service
 echo 'Done'
 "@
 
