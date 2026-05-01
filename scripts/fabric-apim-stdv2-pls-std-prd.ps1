@@ -716,7 +716,7 @@ Log "Configuring iptables DNAT on VMSS instances: *:443 -> APIM PE $APIM_PE_IP:4
 
 $setupIptablesTemplate = Join-Path $PSScriptRoot "setup-iptables.sh"
 if (-not (Test-Path $setupIptablesTemplate)) {
-        LogError "Missing setup script template: $setupIptablesTemplate"
+    LogError "Missing setup script template: $setupIptablesTemplate"
 }
 
 $iptablesServiceTemplate = Join-Path $PSScriptRoot "iptables-dnat.service"
@@ -734,7 +734,7 @@ $vmssExtSettingsFile = "$env:TEMP\vmss-custom-script-settings.json"
 # (replaces iptables-persistent which requires outbound internet access)
 WriteJson $vmssExtSettingsFile @"
 {
-    "commandToExecute": "bash -c \"set -e; echo '$setupIptablesB64' | base64 -d > /usr/local/bin/setup-iptables.sh; chmod +x /usr/local/bin/setup-iptables.sh; /usr/local/bin/setup-iptables.sh; echo '$iptablesServiceB64' | base64 -d > /etc/systemd/system/iptables-dnat.service; systemctl daemon-reload; systemctl enable iptables-dnat.service\""
+    "commandToExecute": "bash -c \"set -e; echo '$setupIptablesB64' | base64 -d > /usr/local/bin/setup-iptables.sh; chmod +x /usr/local/bin/setup-iptables.sh; /usr/local/bin/setup-iptables.sh; echo '$iptablesServiceB64' | base64 -d > /etc/systemd/system/iptables-dnat.service; systemctl daemon-reload; systemctl enable --now iptables-dnat.service\""
 }
 "@
 
