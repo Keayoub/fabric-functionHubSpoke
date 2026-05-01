@@ -715,9 +715,11 @@ if ($EnableAutoscale) {
 Log "Configuring iptables DNAT on VMSS instances: *:443 -> APIM PE $APIM_PE_IP:443 ..."
 
 $vmssExtSettingsFile = "$env:TEMP\vmss-custom-script-settings.json"
+# Persistence via systemd unit — no package dependencies, works in restricted subnets
+# (replaces iptables-persistent which requires outbound internet access)
 WriteJson $vmssExtSettingsFile @"
 {
-  "commandToExecute": "bash -c \"set -e; grep -q '^net.ipv4.ip_forward=1$' /etc/sysctl.conf || echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf; sysctl -p; iptables -t nat -C PREROUTING -p tcp --dport 443 -j DNAT --to-destination $APIM_PE_IP:443 2>/dev/null || iptables -t nat -A PREROUTING -p tcp --dport 443 -j DNAT --to-destination $APIM_PE_IP:443; iptables -t nat -C POSTROUTING -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -j MASQUERADE; if ! dpkg -s iptables-persistent >/dev/null 2>&1; then apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent; fi; netfilter-persistent save\""
+  "commandToExecute": "bash -c \"set -e; grep -q '^net.ipv4.ip_forward=1$' /etc/sysctl.conf || echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf; sysctl -p; iptables -t nat -C PREROUTING -p tcp --dport 443 -j DNAT --to-destination $APIM_PE_IP:443 2>/dev/null || iptables -t nat -A PREROUTING -p tcp --dport 443 -j DNAT --to-destination $APIM_PE_IP:443; iptables -t nat -C POSTROUTING -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -j MASQUERADE; printf '#!/bin/bash\nsysctl -w net.ipv4.ip_forward=1\niptables -t nat -C PREROUTING -p tcp --dport 443 -j DNAT --to-destination $APIM_PE_IP:443 2>/dev/null || iptables -t nat -A PREROUTING -p tcp --dport 443 -j DNAT --to-destination $APIM_PE_IP:443\niptables -t nat -C POSTROUTING -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -j MASQUERADE\n' > /usr/local/bin/setup-iptables.sh; chmod +x /usr/local/bin/setup-iptables.sh; printf '[Unit]\nDescription=iptables DNAT forwarder for APIM PE\nAfter=network.target\n\n[Service]\nType=oneshot\nExecStart=/usr/local/bin/setup-iptables.sh\nRemainAfterExit=yes\n\n[Install]\nWantedBy=multi-user.target\n' > /etc/systemd/system/iptables-dnat.service; systemctl daemon-reload; systemctl enable iptables-dnat.service\""
 }
 "@
 
