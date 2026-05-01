@@ -719,15 +719,22 @@ if (-not (Test-Path $setupIptablesTemplate)) {
         LogError "Missing setup script template: $setupIptablesTemplate"
 }
 
+$iptablesServiceTemplate = Join-Path $PSScriptRoot "iptables-dnat.service"
+if (-not (Test-Path $iptablesServiceTemplate)) {
+    LogError "Missing systemd unit template: $iptablesServiceTemplate"
+}
+
 $setupIptablesContent = (Get-Content -Path $setupIptablesTemplate -Raw).Replace("__APIM_PE_IP__", $APIM_PE_IP)
 $setupIptablesB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($setupIptablesContent))
+$iptablesServiceContent = Get-Content -Path $iptablesServiceTemplate -Raw
+$iptablesServiceB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($iptablesServiceContent))
 
 $vmssExtSettingsFile = "$env:TEMP\vmss-custom-script-settings.json"
 # Persistence via systemd unit — no package dependencies, works in restricted subnets
 # (replaces iptables-persistent which requires outbound internet access)
 WriteJson $vmssExtSettingsFile @"
 {
-    "commandToExecute": "bash -c \"set -e; echo '$setupIptablesB64' | base64 -d > /usr/local/bin/setup-iptables.sh; chmod +x /usr/local/bin/setup-iptables.sh; /usr/local/bin/setup-iptables.sh; printf '[Unit]\nDescription=iptables DNAT forwarder for APIM PE\nAfter=network.target\n\n[Service]\nType=oneshot\nExecStart=/usr/local/bin/setup-iptables.sh\nRemainAfterExit=yes\n\n[Install]\nWantedBy=multi-user.target\n' > /etc/systemd/system/iptables-dnat.service; systemctl daemon-reload; systemctl enable iptables-dnat.service\""
+    "commandToExecute": "bash -c \"set -e; echo '$setupIptablesB64' | base64 -d > /usr/local/bin/setup-iptables.sh; chmod +x /usr/local/bin/setup-iptables.sh; /usr/local/bin/setup-iptables.sh; echo '$iptablesServiceB64' | base64 -d > /etc/systemd/system/iptables-dnat.service; systemctl daemon-reload; systemctl enable iptables-dnat.service\""
 }
 "@
 

@@ -616,7 +616,13 @@ if (-not (Test-Path $setupIptablesTemplate)) {
     LogError "Missing setup script template: $setupIptablesTemplate"
 }
 
+$iptablesServiceTemplate = Join-Path $PSScriptRoot "iptables-dnat.service"
+if (-not (Test-Path $iptablesServiceTemplate)) {
+    LogError "Missing systemd unit template: $iptablesServiceTemplate"
+}
+
 $setupIptablesContent = (Get-Content -Path $setupIptablesTemplate -Raw).Replace("__APIM_PE_IP__", $APIM_PE_IP)
+$iptablesServiceContent = Get-Content -Path $iptablesServiceTemplate -Raw
 
 $iptablesScript = @"
 cat > /usr/local/bin/setup-iptables.sh << 'SCRIPT'
@@ -628,17 +634,7 @@ chmod +x /usr/local/bin/setup-iptables.sh
 
 # Persist rules across reboots using systemd (no package dependency)
 cat > /etc/systemd/system/iptables-dnat.service << 'UNIT'
-[Unit]
-Description=iptables DNAT forwarder for APIM PE
-After=network.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/setup-iptables.sh
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
+$iptablesServiceContent
 UNIT
 
 systemctl daemon-reload
