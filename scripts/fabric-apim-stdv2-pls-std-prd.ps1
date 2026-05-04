@@ -210,7 +210,7 @@ function WaitProvisioning($label, $scriptBlock, $interval = 60, $maxAttempts = 6
 }
 
 function WriteJson($path, $content) {
-    $content | Set-Content -FilePath $path -Encoding utf8NoBOM
+    $content | Set-Content -Path $path -Encoding utf8NoBOM
 }
 
 function TryGetValue($scriptBlock) {
