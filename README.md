@@ -76,6 +76,7 @@ fabric-functionHubSpoke/
 │
 ├── scripts/
 │   └── setup_sp_keyvault.ps1         # Script to bootstrap Key Vault secrets
+│   └── full_network_diagnostics.ps1   # End-to-end Fabric MPE/APIM private path diagnostics
 │
 ├── samples/
 │   ├── call_function_sample.ipynb    # Example notebook calling the function
@@ -258,6 +259,44 @@ For Fabric notebooks to reach the Function App:
 1. **Fabric Workspace → Settings → Managed Private Endpoints**
 2. **Create new MPE**:
    - Target resource type: **Azure Function App**
+
+## 🔎 Full Diagnostics Script
+
+Use the full diagnostics script to validate Fabric MPE, Azure Private Link Service, load balancer, DNS/TCP/HTTPS reachability, and optional forwarding VM checks in one run.
+
+```powershell
+./scripts/full_network_diagnostics.ps1 \
+  -SubscriptionId "<subscription-id>" \
+  -ResourceGroup "azapim-dev-rg" \
+  -PrivateLinkServiceName "apim-dev-pls01" \
+  -LoadBalancerName "<lb-name>" \
+  -FabricWorkspaceId "<fabric-workspace-id>" \
+  -ManagedPrivateEndpointName "mpe-apim-dev01" \
+  -Hostnames "stc-poc-dev-apim.azure-api.net" \
+  -TestUrl "https://stc-poc-dev-apim.azure-api.net/health" \
+  -VmResourceGroup "azapim-dev-rg" \
+  -VmName "fwd-apim-dev-vm"
+```
+
+Notes:
+- If `-FabricToken` is not provided, the script tries `az account get-access-token --resource https://api.fabric.microsoft.com`.
+- A JSON report is written to `%TEMP%` by default and the file path is printed in the summary.
+
+### One-command wrapper (team defaults)
+
+For day-to-day use, run the wrapper script with your environment defaults:
+
+```powershell
+./scripts/run_diagnostics.ps1
+```
+
+You can override any default on the command line, for example:
+
+```powershell
+./scripts/run_diagnostics.ps1 -FabricWorkspaceId "<workspace-id>" -ManagedPrivateEndpointName "mpe-apim-dev01"
+```
+
+Tip: edit the `DEFAULTS` block at the top of `scripts/run_diagnostics.ps1` once for your team.
    - Subscription: Select your subscription
    - Resource: Select your Function App (`$FUNCTION_APP`)
 3. **Approve the MPE** in Azure Portal (if required by your policies)

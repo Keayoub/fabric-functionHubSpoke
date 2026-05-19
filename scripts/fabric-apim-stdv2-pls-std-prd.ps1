@@ -160,6 +160,7 @@ $LB_RULE_NAME        = "lb-rule-https"
 
 # Private Link Service (Standard)
 $PLS_NAME            = "pls-apim-standard"
+$PLS_FQDN            = "$APIM_NAME.azure-api.net"
 
 # APIM Private Endpoint (inbound)
 $PE_NAME             = "pe-apim-inbound"
@@ -884,7 +885,8 @@ if (-not (TryGetValue { az network private-link-service show --resource-group $R
         --location $LOCATION `
         --vnet-name $VNET_NAME `
         --subnet $PLS_SUBNET `
-        --lb-frontend-ip-configs $LB_FRONTEND_ID | Out-Null
+        --lb-frontend-ip-configs $LB_FRONTEND_ID `
+        --fqdns $PLS_FQDN | Out-Null
     
     WaitProvisioning "PLS Standard" {
         az network private-link-service show `
@@ -895,6 +897,22 @@ if (-not (TryGetValue { az network private-link-service show --resource-group $R
 } else {
     LogWarn "Private Link Service $PLS_NAME already exists. Reusing existing PLS."
 }
+
+# Keep reruns idempotent: ensure PLS provider-side FQDN metadata is present.
+az network private-link-service update `
+    --resource-group $RG `
+    --name $PLS_NAME `
+    --fqdns $PLS_FQDN | Out-Null
+
+$plsConfiguredFqdns = az network private-link-service show `
+    --resource-group $RG `
+    --name $PLS_NAME `
+    --query "fqdns" -o tsv
+
+if (-not $plsConfiguredFqdns) {
+    LogError "PLS FQDN configuration validation failed."
+}
+LogOk "PLS FQDNs: $plsConfiguredFqdns"
 
 $PLS_ID = az network private-link-service show `
     --resource-group $RG --name $PLS_NAME --query "id" -o tsv
