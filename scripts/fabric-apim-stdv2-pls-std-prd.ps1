@@ -58,6 +58,13 @@
             - Scale out when Network Out is high OR CPU is high
             - Scale in when Network Out is low AND CPU is low
 
+.PARAMETER EnableEndToEndProbe
+    Optional switch to configure an end-to-end health probe.
+        - Default behavior (switch not set): LB probes VMSS liveness on TCP/22.
+        - End-to-end behavior (switch set): LB probes VMSS HTTP health endpoint
+          on port 18080, and that endpoint validates TLS/SNI connectivity to
+          https://<apim-name>.azure-api.net through the APIM private endpoint.
+
 .EXAMPLE
     # Run preflight checks only — no Azure resources are created.
     .\fabric-apim-stdv2-pls-standard.ps1 -ValidateOnly `
@@ -88,7 +95,8 @@ param(
     [string]$FabricWorkspaceId,
     [string]$PublisherEmail,
     [string]$PublisherName,
-    [switch]$EnableAutoscale
+    [switch]$EnableAutoscale,
+    [switch]$EnableEndToEndProbe
 )
 
 Set-StrictMode -Version Latest
@@ -155,8 +163,15 @@ $VMSS_SCALE_IN_NETWORK_OUT_BYTES_PER_MIN  = [int64]($VMSS_SCALE_IN_NETWORK_OUT_M
 $LB_NAME             = "lb-apim-internal"
 $LB_FRONTEND_NAME    = "lb-frontend"
 $LB_BACKEND_NAME     = "lb-backend"
-$LB_PROBE_NAME       = "lb-probe-https"
+$LB_PROBE_NAME       = "lb-probe-tcp"
+$LB_PROBE_PROTOCOL   = "Tcp"
+$LB_PROBE_PORT       = 22
+$LB_PROBE_PATH       = "/"
 $LB_RULE_NAME        = "lb-rule-https"
+
+# Optional VMSS local HTTP endpoint for end-to-end APIM probing
+$VMSS_HEALTH_PORT    = 18080
+$VMSS_HEALTH_PATH    = "/healthz"
 
 # Private Link Service (Standard)
 $PLS_NAME            = "pls-apim-standard"
@@ -177,6 +192,13 @@ $MPE_NAME            = "mpe-apim-stdv2"
 if ($PSBoundParameters.ContainsKey("FabricWorkspaceId")) { $FABRIC_WS_ID = $FabricWorkspaceId }
 if ($PSBoundParameters.ContainsKey("PublisherEmail")) { $PUBLISHER_EMAIL = $PublisherEmail }
 if ($PSBoundParameters.ContainsKey("PublisherName")) { $PUBLISHER_NAME = $PublisherName }
+
+if ($EnableEndToEndProbe) {
+    $LB_PROBE_NAME = "lb-probe-http-apim-e2e"
+    $LB_PROBE_PROTOCOL = "Http"
+    $LB_PROBE_PORT = $VMSS_HEALTH_PORT
+    $LB_PROBE_PATH = $VMSS_HEALTH_PATH
+}
 
 #region --- HELPERS ---
 
@@ -397,6 +419,7 @@ az network nsg create `
 $vmRules = @(
     @{ name = "AllowHTTPS-FromPLS"; priority = 100; src = $PLS_SUBNET_PREFIX; port = "443"; desc = "Allow HTTPS from PLS/LB range" },
     @{ name = "AllowHTTPS-FromVNet"; priority = 110; src = "VirtualNetwork";  port = "443"; desc = "Allow HTTPS from VNet" },
+    @{ name = "AllowHealthHTTP-FromVNet"; priority = 120; src = "VirtualNetwork";  port = "$VMSS_HEALTH_PORT"; desc = "VMSS local health endpoint" },
     @{ name = "AllowSSH-Mgmt";      priority = 200; src = "VirtualNetwork";  port = "22";  desc = "SSH management" }
 )
 
@@ -730,12 +753,87 @@ $setupIptablesB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($se
 $iptablesServiceContent = Get-Content -Path $iptablesServiceTemplate -Raw
 $iptablesServiceB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($iptablesServiceContent))
 
+$healthScriptContent = @"
+#!/usr/bin/env python3
+import os
+import socket
+import ssl
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+TARGET_IP = os.environ.get("TARGET_IP", "")
+TARGET_HOST = os.environ.get("TARGET_HOST", "")
+TARGET_PORT = int(os.environ.get("TARGET_PORT", "443"))
+HEALTH_PATH = os.environ.get("HEALTH_PATH", "/healthz")
+
+def check_apim():
+    if not TARGET_IP or not TARGET_HOST:
+        return False
+    ctx = ssl.create_default_context()
+    with socket.create_connection((TARGET_IP, TARGET_PORT), timeout=3) as sock:
+        with ctx.wrap_socket(sock, server_hostname=TARGET_HOST):
+            return True
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path != HEALTH_PATH:
+            self.send_response(404)
+            self.end_headers()
+            return
+
+        try:
+            ok = check_apim()
+        except Exception:
+            ok = False
+
+        self.send_response(200 if ok else 503)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(("ok\n" if ok else "unhealthy\n").encode("utf-8"))
+
+    def log_message(self, format, *args):
+        return
+
+if __name__ == "__main__":
+    port = int(os.environ.get("LISTEN_PORT", "18080"))
+    server = HTTPServer(("0.0.0.0", port), Handler)
+    server.serve_forever()
+"@
+$healthScriptB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($healthScriptContent))
+
+$healthServiceContent = @"
+[Unit]
+Description=APIM end-to-end health endpoint
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=TARGET_IP=$APIM_PE_IP
+Environment=TARGET_HOST=$APIM_NAME.azure-api.net
+Environment=TARGET_PORT=443
+Environment=HEALTH_PATH=$VMSS_HEALTH_PATH
+Environment=LISTEN_PORT=$VMSS_HEALTH_PORT
+ExecStart=/usr/bin/python3 /usr/local/bin/apim-e2e-health.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+"@
+$healthServiceB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($healthServiceContent))
+
 $vmssExtSettingsFile = "$env:TEMP\vmss-custom-script-settings.json"
 # Persistence via systemd unit — no package dependencies, works in restricted subnets
 # (replaces iptables-persistent which requires outbound internet access)
+$vmssCustomScriptCommand = "set -e; echo '$setupIptablesB64' | base64 -d > /usr/local/bin/setup-iptables.sh; chmod +x /usr/local/bin/setup-iptables.sh; /usr/local/bin/setup-iptables.sh; echo '$iptablesServiceB64' | base64 -d > /etc/systemd/system/iptables-dnat.service; systemctl daemon-reload; systemctl enable --now iptables-dnat.service"
+
+if ($EnableEndToEndProbe) {
+    $vmssCustomScriptCommand += "; echo '$healthScriptB64' | base64 -d > /usr/local/bin/apim-e2e-health.py; chmod +x /usr/local/bin/apim-e2e-health.py; echo '$healthServiceB64' | base64 -d > /etc/systemd/system/apim-e2e-health.service; systemctl daemon-reload; systemctl enable --now apim-e2e-health.service"
+}
+
 WriteJson $vmssExtSettingsFile @"
 {
-    "commandToExecute": "bash -c \"set -e; echo '$setupIptablesB64' | base64 -d > /usr/local/bin/setup-iptables.sh; chmod +x /usr/local/bin/setup-iptables.sh; /usr/local/bin/setup-iptables.sh; echo '$iptablesServiceB64' | base64 -d > /etc/systemd/system/iptables-dnat.service; systemctl daemon-reload; systemctl enable --now iptables-dnat.service\""
+    "commandToExecute": "bash -c \"$vmssCustomScriptCommand\""
 }
 "@
 
@@ -785,7 +883,7 @@ Log "=== STEP 8: Internal Load Balancer for Standard PLS ==="
 #
 # PRODUCTION default:
 #   - VMSS instances are attached to the backend pool in this step.
-#   - LB health probe (port 443, configured below) routes around unhealthy instances.
+#   - LB health probe (configured below) routes around unhealthy instances.
 # Optional hardening:
 #   - When creating the LB omit --zone to get a zone-redundant frontend IP,
 #     ensuring the LB itself survives an Availability Zone failure.
@@ -830,18 +928,54 @@ az vmss update-instances `
 LogOk "VMSS attached to load balancer backend pool"
 
 # Create health probe
+# NOTE:
+# Probing 443 through this forwarder pattern can fail because APIM private endpoint
+# expects the APIM hostname/SNI and may not treat a generic TCP/TLS probe as healthy.
+# Using port 22 validates forwarder VMSS instance liveness.
+# Optional end-to-end mode uses HTTP probe on the VMSS local health endpoint,
+# which actively validates APIM TLS/SNI reachability.
 if (-not (TryGetValue { az network lb probe show --resource-group $RG --lb-name $LB_NAME --name $LB_PROBE_NAME --query "id" -o tsv })) {
-    az network lb probe create `
-        --resource-group $RG `
-        --lb-name $LB_NAME `
-        --name $LB_PROBE_NAME `
-        --protocol Tcp `
-        --port 443 `
-        --interval 15 `
-        --threshold 2 | Out-Null
-    LogOk "Health probe created: $LB_PROBE_NAME"
+    if ($LB_PROBE_PROTOCOL -eq "Http" -or $LB_PROBE_PROTOCOL -eq "Https") {
+        az network lb probe create `
+            --resource-group $RG `
+            --lb-name $LB_NAME `
+            --name $LB_PROBE_NAME `
+            --protocol $LB_PROBE_PROTOCOL `
+            --port $LB_PROBE_PORT `
+            --path $LB_PROBE_PATH `
+            --interval 15 `
+            --threshold 2 | Out-Null
+    }
+    else {
+        az network lb probe create `
+            --resource-group $RG `
+            --lb-name $LB_NAME `
+            --name $LB_PROBE_NAME `
+            --protocol $LB_PROBE_PROTOCOL `
+            --port $LB_PROBE_PORT `
+            --interval 15 `
+            --threshold 2 | Out-Null
+    }
+    LogOk "Health probe created: $LB_PROBE_NAME ($LB_PROBE_PROTOCOL/$LB_PROBE_PORT)"
 } else {
-    LogWarn "Health probe $LB_PROBE_NAME already exists."
+    if ($LB_PROBE_PROTOCOL -eq "Http" -or $LB_PROBE_PROTOCOL -eq "Https") {
+        az network lb probe update `
+            --resource-group $RG `
+            --lb-name $LB_NAME `
+            --name $LB_PROBE_NAME `
+            --protocol $LB_PROBE_PROTOCOL `
+            --port $LB_PROBE_PORT `
+            --path $LB_PROBE_PATH | Out-Null
+    }
+    else {
+        az network lb probe update `
+            --resource-group $RG `
+            --lb-name $LB_NAME `
+            --name $LB_PROBE_NAME `
+            --protocol $LB_PROBE_PROTOCOL `
+            --port $LB_PROBE_PORT | Out-Null
+    }
+    LogWarn "Health probe $LB_PROBE_NAME already exists. Updated to $LB_PROBE_PROTOCOL/$LB_PROBE_PORT."
 }
 
 # Create load balancing rule
@@ -858,7 +992,12 @@ if (-not (TryGetValue { az network lb rule show --resource-group $RG --lb-name $
         --probe-name $LB_PROBE_NAME | Out-Null
     LogOk "Load balancing rule created: $LB_RULE_NAME"
 } else {
-    LogWarn "Load balancing rule $LB_RULE_NAME already exists."
+    az network lb rule update `
+        --resource-group $RG `
+        --lb-name $LB_NAME `
+        --name $LB_RULE_NAME `
+        --probe-name $LB_PROBE_NAME | Out-Null
+    LogWarn "Load balancing rule $LB_RULE_NAME already exists. Updated probe to $LB_PROBE_NAME."
 }
 
 $LB_FRONTEND_IP = az network lb frontend-ip show `
@@ -1033,6 +1172,12 @@ Write-Host "  Load Balancer     : $LB_NAME ($LB_FRONTEND_IP)"                   
 Write-Host "  VMSS Forwarder    : $VMSS_NAME (count: $VMSS_INSTANCE_COUNT) -> PE $APIM_PE_IP" -ForegroundColor White
 Write-Host "  VMSS Instance IPs : $VMSS_PRIVATE_IPS"                                       -ForegroundColor White
 Write-Host "  VMSS Autoscale    : $VMSS_AUTOSCALE_STATUS"                                  -ForegroundColor White
+if ($LB_PROBE_PROTOCOL -eq "Http" -or $LB_PROBE_PROTOCOL -eq "Https") {
+    Write-Host "  LB Probe          : $LB_PROBE_NAME ($LB_PROBE_PROTOCOL/$LB_PROBE_PORT $LB_PROBE_PATH)" -ForegroundColor White
+}
+else {
+    Write-Host "  LB Probe          : $LB_PROBE_NAME ($LB_PROBE_PROTOCOL/$LB_PROBE_PORT)" -ForegroundColor White
+}
 Write-Host "  APIM              : $APIM_NAME (Standard v2)"                              -ForegroundColor White
 Write-Host "  APIM PE IP        : $APIM_PE_IP"                                            -ForegroundColor White
 Write-Host "  APIM Endpoint     : https://$APIM_NAME.azure-api.net"                     -ForegroundColor White
