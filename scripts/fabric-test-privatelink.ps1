@@ -80,23 +80,23 @@ $WorkspacePrefix = "$WorkspaceIdNoDashes.z$ZoneCode"
 $FabricEndpoints = [ordered]@{
     "WorkspaceAPI" = @{
         Hostname   = "$WorkspacePrefix.w.api.fabric.microsoft.com"
-        ExpectedIP = "10.151.0.144"
+        ExpectedIP = "10.x.x.x"  # Replace with actual expected IP if known
     }
     "Control" = @{
         Hostname   = "$WorkspacePrefix.c.fabric.microsoft.com"
-        ExpectedIP = "10.151.0.145"
+        ExpectedIP = "10.x.x.x"  # Replace with actual expected IP if known
     }
     "OneLake" = @{
         Hostname   = "$WorkspacePrefix.onelake.fabric.microsoft.com"
-        ExpectedIP = "10.151.0.146"
+        ExpectedIP = "10.x.x.x"  # Replace with actual expected IP if known
     }
     "DFS" = @{
         Hostname   = "$WorkspacePrefix.dfs.fabric.microsoft.com"
-        ExpectedIP = "10.151.0.147"
+        ExpectedIP = "10.x.x.x"  # Replace with actual expected IP if known
     }
     "Blob" = @{
         Hostname   = "$WorkspacePrefix.blob.fabric.microsoft.com"
-        ExpectedIP = "10.151.0.148"
+        ExpectedIP = "10.x.x.x"  # Replace with actual expected IP if known
     }
 }
 
