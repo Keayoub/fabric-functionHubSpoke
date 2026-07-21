@@ -249,6 +249,22 @@ $PLS_ID = az network private-link-service show `
     --resource-group $RG --name $PLS_NAME --query "id" -o tsv
 LogOk "PLS ID: $PLS_ID"
 
+# Keep reruns idempotent: ensure the provider-side FQDN metadata is present.
+az network private-link-service update `
+    --resource-group $RG `
+    --name $PLS_NAME `
+    --fqdns "$APIM_NAME.azure-api.net" | Out-Null
+
+$plsConfiguredFqdns = az network private-link-service show `
+    --resource-group $RG `
+    --name $PLS_NAME `
+    --query "fqdns" -o tsv
+
+if (-not $plsConfiguredFqdns) {
+    LogError "PLS FQDN configuration validation failed."
+}
+LogOk "PLS FQDNs: $plsConfiguredFqdns"
+
 # =============================================================================
 Log "=== STEP 7: Fabric Managed Private Endpoint ==="
 # =============================================================================

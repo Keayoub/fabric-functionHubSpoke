@@ -256,9 +256,16 @@ func azure functionapp publish $FUNCTION_APP --no-build --python
 
 For Fabric notebooks to reach the Function App:
 
-1. **Fabric Workspace → Settings → Managed Private Endpoints**
-2. **Create new MPE**:
-   - Target resource type: **Azure Function App**
+1. Create the MPE with the Fabric REST API if the workspace UI does not expose the target.
+2. Approve the MPE in the Azure Private Link Service resource.
+3. If the PLS FQDN list is still empty after approval, update it with the Azure CLI:
+
+```powershell
+az network private-link-service update `
+  --resource-group <resource-group> `
+  --name <pls-name> `
+  --fqdns <function-app-or-apim-fqdn>
+```
 
 ## 🔎 Full Diagnostics Script
 
