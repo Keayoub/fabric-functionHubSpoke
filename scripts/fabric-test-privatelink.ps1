@@ -30,7 +30,7 @@ $ErrorActionPreference = "Stop"
 # ---------------------------------------------------------------------------
 
 if ($GatewayType -eq "Auto") {
-    $shirPath   = "C:\Program Files\Microsoft Integration Runtime"
+    $shirPath = "C:\Program Files\Microsoft Integration Runtime"
     $onPremPath = "C:\Program Files\On-premises data gateway"
 
     if (Test-Path $shirPath) {
@@ -80,29 +80,29 @@ $WorkspacePrefix = "$WorkspaceIdNoDashes.z$ZoneCode"
 $FabricEndpoints = [ordered]@{
     "WorkspaceAPI" = @{
         Hostname   = "$WorkspacePrefix.w.api.fabric.microsoft.com"
-        ExpectedIP = "10.x.x.x"  # Replace with actual expected IP if known
+        ExpectedIP = "10.151.0.144"
     }
-    "Control" = @{
+    "Control"      = @{
         Hostname   = "$WorkspacePrefix.c.fabric.microsoft.com"
-        ExpectedIP = "10.x.x.x"  # Replace with actual expected IP if known
+        ExpectedIP = "10.151.0.145"
     }
-    "OneLake" = @{
+    "OneLake"      = @{
         Hostname   = "$WorkspacePrefix.onelake.fabric.microsoft.com"
-        ExpectedIP = "10.x.x.x"  # Replace with actual expected IP if known
+        ExpectedIP = "10.151.0.146"
     }
-    "DFS" = @{
+    "DFS"          = @{
         Hostname   = "$WorkspacePrefix.dfs.fabric.microsoft.com"
-        ExpectedIP = "10.x.x.x"  # Replace with actual expected IP if known
+        ExpectedIP = "10.151.0.147"
     }
-    "Blob" = @{
+    "Blob"         = @{
         Hostname   = "$WorkspacePrefix.blob.fabric.microsoft.com"
-        ExpectedIP = "10.x.x.x"  # Replace with actual expected IP if known
+        ExpectedIP = "10.151.0.148"
     }
 }
 
 $FabricPrivateIPs = @(
     $FabricEndpoints.Values |
-        ForEach-Object { $_.ExpectedIP }
+    ForEach-Object { $_.ExpectedIP }
 )
 
 $GlobalEndpoints = @(
@@ -139,8 +139,8 @@ function Resolve-IPv4Address {
     try {
         return @(
             Resolve-DnsName $Hostname -Type A -ErrorAction Stop |
-                Where-Object IPAddress |
-                Select-Object -ExpandProperty IPAddress -Unique
+            Where-Object IPAddress |
+            Select-Object -ExpandProperty IPAddress -Unique
         )
     }
     catch {
@@ -183,12 +183,12 @@ function Test-TlsAndHttp {
     )
 
     $result = [ordered]@{
-        TLS       = $false
-        HTTP      = $false
-        HTTPStatus = $null
+        TLS                = $false
+        HTTP               = $false
+        HTTPStatus         = $null
         CertificateSubject = $null
         CertificateIssuer  = $null
-        Error     = $null
+        Error              = $null
     }
 
     $tcpClient = [System.Net.Sockets.TcpClient]::new()
@@ -292,16 +292,16 @@ Write-Host ""
 Write-Host "1. Gateway VM network configuration" -ForegroundColor Yellow
 
 Get-NetIPConfiguration |
-    Where-Object IPv4Address |
-    ForEach-Object {
-        [PSCustomObject]@{
-            Interface      = $_.InterfaceAlias
-            IPv4Address    = ($_.IPv4Address.IPAddress -join ", ")
-            DefaultGateway = ($_.IPv4DefaultGateway.NextHop -join ", ")
-            DNSServers     = ($_.DNSServer.ServerAddresses -join ", ")
-        }
-    } |
-    Format-Table -AutoSize
+Where-Object IPv4Address |
+ForEach-Object {
+    [PSCustomObject]@{
+        Interface      = $_.InterfaceAlias
+        IPv4Address    = ($_.IPv4Address.IPAddress -join ", ")
+        DefaultGateway = ($_.IPv4DefaultGateway.NextHop -join ", ")
+        DNSServers     = ($_.DNSServer.ServerAddresses -join ", ")
+    }
+} |
+Format-Table -AutoSize
 
 # ---------------------------------------------------------------------------
 # 2. Gateway service and version
@@ -311,22 +311,22 @@ Write-Host ""
 Write-Host "2. $($GatewayConfig.DisplayName) service and process information" -ForegroundColor Yellow
 
 $gatewayServices = Get-CimInstance Win32_Service |
-    Where-Object {
-        $_.Name    -match $GatewayConfig.ServicePattern -or
-        $_.DisplayName -match $GatewayConfig.ServicePattern
-    }
+Where-Object {
+    $_.Name -match $GatewayConfig.ServicePattern -or
+    $_.DisplayName -match $GatewayConfig.ServicePattern
+}
 
 $gatewayServices |
-    Select-Object Name, DisplayName, State, ProcessId, PathName |
-    Format-Table -AutoSize
+Select-Object Name, DisplayName, State, ProcessId, PathName |
+Format-Table -AutoSize
 
 if (Test-Path $GatewayConfig.ExecutablePath) {
     $version = (Get-Item $GatewayConfig.ExecutablePath).VersionInfo
 
     [PSCustomObject]@{
-        ProductVersion   = $version.ProductVersion
-        FileVersion      = $version.FileVersion
-        RequiredMinimum  = $GatewayConfig.RequiredMinVersion
+        ProductVersion  = $version.ProductVersion
+        FileVersion     = $version.FileVersion
+        RequiredMinimum = $GatewayConfig.RequiredMinVersion
     } |
     Format-Table -AutoSize
 }
@@ -356,7 +356,7 @@ $endpointResults = foreach ($endpointName in $FabricEndpoints.Keys) {
 
     try {
         $route = Find-NetRoute -RemoteIPAddress $expectedIP |
-            Select-Object -First 1
+        Select-Object -First 1
 
         $routeNextHop = $route.NextHop
         $routeInterface = $route.InterfaceAlias
@@ -385,15 +385,15 @@ $endpointResults = foreach ($endpointName in $FabricEndpoints.Keys) {
 }
 
 $endpointResults |
-    Format-Table Endpoint, ExpectedIP, ResolvedIPs, DNSPrivate, TCP443, TLS, HTTP -AutoSize
+Format-Table Endpoint, ExpectedIP, ResolvedIPs, DNSPrivate, TCP443, TLS, HTTP -AutoSize
 
 Write-Host ""
 Write-Host "Detailed endpoint results:" -ForegroundColor DarkCyan
 
 $endpointResults |
-    Format-List Endpoint, Hostname, ExpectedIP, ResolvedIPs,
-                DNSPrivate, RouteInterface, NextHop, TCP443,
-                TLS, HTTP, Certificate, Error
+Format-List Endpoint, Hostname, ExpectedIP, ResolvedIPs,
+DNSPrivate, RouteInterface, NextHop, TCP443,
+TLS, HTTP, Certificate, Error
 
 # ---------------------------------------------------------------------------
 # 4. Global Fabric endpoint resolution
@@ -406,9 +406,9 @@ $globalResults = foreach ($hostname in $GlobalEndpoints) {
     $resolved = Resolve-IPv4Address -Hostname $hostname
 
     [PSCustomObject]@{
-        Hostname  = $hostname
+        Hostname    = $hostname
         ResolvedIPs = $resolved -join ", "
-        AllPrivate = (
+        AllPrivate  = (
             $resolved.Count -gt 0 -and
             (@($resolved | Where-Object { -not (Test-IsPrivateIPv4 $_) }).Count -eq 0)
         )
@@ -441,21 +441,21 @@ $monitorEnd = $monitorStart.AddSeconds($MonitorSeconds)
 while ((Get-Date) -lt $monitorEnd) {
     # Refresh the process list each iteration.
     $gatewayProcesses = Get-Process -ErrorAction SilentlyContinue |
-        Where-Object {
-            $_.ProcessName -in $GatewayConfig.ProcessNames
-        }
+    Where-Object {
+        $_.ProcessName -in $GatewayConfig.ProcessNames
+    }
 
     if ($gatewayProcesses) {
         $connections = Get-NetTCPConnection -State Established -ErrorAction SilentlyContinue |
-            Where-Object {
-                $_.OwningProcess -in $gatewayProcesses.Id -and
-                $_.RemotePort -eq 443
-            }
+        Where-Object {
+            $_.OwningProcess -in $gatewayProcesses.Id -and
+            $_.RemotePort -eq 443
+        }
 
         foreach ($connection in $connections) {
             $process = $gatewayProcesses |
-                Where-Object Id -eq $connection.OwningProcess |
-                Select-Object -First 1
+            Where-Object Id -EQ $connection.OwningProcess |
+            Select-Object -First 1
 
             $classification = "Public"
 
@@ -466,10 +466,7 @@ while ((Get-Date) -lt $monitorEnd) {
                 $classification = "Other private"
             }
 
-            $key = "{0}|{1}|{2}" -f `
-                $process.ProcessName,
-                $connection.RemoteAddress,
-                $classification
+            $key = "{0}|{1}|{2}" -f $process.ProcessName, $connection.RemoteAddress, $classification
 
             if (-not $observedConnections.ContainsKey($key)) {
                 $observedConnections[$key] = [PSCustomObject]@{
@@ -491,12 +488,7 @@ while ((Get-Date) -lt $monitorEnd) {
     }
 
     $remaining = [math]::Ceiling(($monitorEnd - (Get-Date)).TotalSeconds)
-    Write-Progress `
-        -Activity "Monitoring $GatewayType HTTPS connections" `
-        -Status "$remaining seconds remaining" `
-        -PercentComplete (
-            (($MonitorSeconds - $remaining) / $MonitorSeconds) * 100
-        )
+        Write-Progress -Activity "Monitoring $GatewayType HTTPS connections" -Status "$remaining seconds remaining" -PercentComplete ((($MonitorSeconds - $remaining) / $MonitorSeconds) * 100)
 
     Start-Sleep -Milliseconds 250
 }
@@ -504,14 +496,14 @@ while ((Get-Date) -lt $monitorEnd) {
 Write-Progress -Activity "Monitoring $GatewayType HTTPS connections" -Completed
 
 $connectionResults = @($observedConnections.Values) |
-    Sort-Object Classification, RemoteAddress
+Sort-Object Classification, RemoteAddress
 
 Write-Host ""
 Write-Host "Observed $GatewayType connections:" -ForegroundColor DarkCyan
 
 $connectionResults |
-    Format-Table FirstSeen, Process, PID, RemoteAddress,
-                 RemotePort, Classification, Observations -AutoSize
+Format-Table FirstSeen, Process, PID, RemoteAddress,
+RemotePort, Classification, Observations -AutoSize
 
 # ---------------------------------------------------------------------------
 # 6. DNS cache after the pipeline
@@ -521,12 +513,12 @@ Write-Host ""
 Write-Host "6. Fabric-related DNS cache entries after the run" -ForegroundColor Yellow
 
 $dnsCache = Get-DnsClientCache -ErrorAction SilentlyContinue |
-    Where-Object {
-        $_.Entry -match "fabric|onelake|datafactory|servicebus|microsoftonline"
-    }
+Where-Object {
+    $_.Entry -match "fabric|onelake|datafactory|servicebus|microsoftonline"
+}
 
 $dnsCache |
-    Format-Table Entry, Data, Status, TimeToLive -AutoSize
+Format-Table Entry, Data, Status, TimeToLive -AutoSize
 
 # ---------------------------------------------------------------------------
 # 7. Final assessment
@@ -543,12 +535,12 @@ $tlsFailures = @($endpointResults | Where-Object { -not $_.TLS })
 
 $privateGatewayConnections = @(
     $connectionResults |
-        Where-Object Classification -eq "Fabric Private Link"
+    Where-Object Classification -EQ "Fabric Private Link"
 )
 
 $publicGatewayConnections = @(
     $connectionResults |
-        Where-Object Classification -eq "Public"
+    Where-Object Classification -EQ "Public"
 )
 
 if ($dnsFailures.Count -eq 0) {
