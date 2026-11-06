@@ -81,6 +81,7 @@ $script:OapOverviewUrl = 'https://learn.microsoft.com/fabric/security/workspace-
 $script:OapReportsUrl = 'https://learn.microsoft.com/fabric/security/workspace-outbound-access-protection-power-bi-reports'
 $script:OapPaginatedReportsUrl = 'https://learn.microsoft.com/fabric/security/workspace-outbound-access-protection-paginated-reports'
 $script:OapSetupUrl = 'https://learn.microsoft.com/fabric/security/workspace-outbound-access-protection-set-up'
+$script:OapAvailabilityUrl = 'https://learn.microsoft.com/fabric/security/security-feature-availability'
 
 if (-not (Get-Command fab -ErrorAction SilentlyContinue)) {
     throw 'Microsoft Fabric CLI (fab) was not found. Install it with: pip install --upgrade ms-fabric-cli'
@@ -429,6 +430,7 @@ function Set-OapAssessment {
         [Parameter(Mandatory)]
         [object] $Item,
 
+        [AllowEmptyCollection()]
         [Parameter(Mandatory)]
         [System.Collections.Generic.HashSet[string]] $WorkspaceDatasetIds,
 
@@ -436,6 +438,19 @@ function Set-OapAssessment {
     )
 
     $normalizedType = Normalize-ItemType -Type $Item.Type
+    $unsupportedTypeReasons = @{
+        'apacheairflowjob' = 'Data Workflow (previously Apache Airflow) is listed as unsupported for OAP in the Fabric security feature availability matrix.'
+        'dataworkflow'     = 'Data Workflow (previously Apache Airflow) is listed as unsupported for OAP in the Fabric security feature availability matrix.'
+        'ontology'         = 'Ontology is listed as unsupported for OAP in the Fabric security feature availability matrix.'
+        'sqldatabase'      = 'SQL database in Fabric is listed as unsupported for OAP in the Fabric security feature availability matrix.'
+    }
+
+    if ($unsupportedTypeReasons.ContainsKey($normalizedType)) {
+        $Item.Status = 'Blocker'
+        $Item.Reason = $unsupportedTypeReasons[$normalizedType]
+        $Item.SortRank = 1
+        return
+    }
 
     switch ($normalizedType) {
         'dashboard' {
@@ -541,6 +556,10 @@ function Set-OapAssessment {
         'lakehouse',
         'notebook',
         'sparkjobdefinition',
+        'graphmodel',
+        'kqldatabase',
+        'plan',
+        'variablelibrary',
         'environment',
         'pipeline',
         'datapipeline',
@@ -1242,7 +1261,7 @@ $markdown.Add('')
 Add-MarkdownItemTable `
     -Output $markdown `
     -Items $blockers `
-    -EmptyMessage 'No confirmed dashboard or scorecard blocker was found by the completed inventories.'
+    -EmptyMessage 'No confirmed unsupported item-type blocker was found by the completed inventories.'
 $markdown.Add('[Back to navigation](#navigation)')
 $markdown.Add('')
 
@@ -1374,6 +1393,7 @@ $markdown.Add('<a id="assessment-rules-and-references"></a>')
 $markdown.Add('## Assessment rules and references')
 $markdown.Add('')
 $markdown.Add('- **Blocker:** Power BI dashboard, scorecard, or metrics artifact.')
+$markdown.Add('- **Matrix blocker:** any item type listed as unsupported for OAP in the Fabric security feature availability matrix.')
 $markdown.Add('- **Attention:** supported item with a known binding, connection-rule, or workload-specific condition.')
 $markdown.Add('- **Supported:** item type is listed as OAP-supported; connection validation may still be required.')
 $markdown.Add('- **Review:** item type is unknown to this script and is not automatically labeled a blocker.')
@@ -1382,6 +1402,7 @@ $markdown.Add("- [Workspace OAP overview and supported item types]($script:OapOv
 $markdown.Add("- [OAP for interactive Power BI reports]($script:OapReportsUrl)")
 $markdown.Add("- [OAP for paginated reports]($script:OapPaginatedReportsUrl)")
 $markdown.Add("- [Enable workspace OAP]($script:OapSetupUrl)")
+$markdown.Add("- [Fabric security feature availability by item type]($script:OapAvailabilityUrl)")
 $markdown.Add('')
 $markdown.Add('> Documentation and service support evolve. Re-run the script and compare Review items against the latest Microsoft documentation before making destructive changes.')
 $markdown.Add('')
@@ -1440,6 +1461,7 @@ if (-not $SkipHtml) {
             reports          = $script:OapReportsUrl
             paginatedReports = $script:OapPaginatedReportsUrl
             setup            = $script:OapSetupUrl
+            availability     = $script:OapAvailabilityUrl
         }
     }
 
@@ -1625,7 +1647,7 @@ function init(){
   ['search','statusFilter','typeFilter','sourceFilter'].forEach(id=>$(id).addEventListener(id==='search'?'input':'change',applyFilters));
   $('clearFilters').addEventListener('click',()=>{$('search').value='';$('statusFilter').value='';$('typeFilter').value='';$('sourceFilter').value='';applyFilters();});$('exportCsv').addEventListener('click',exportCsv);
   document.querySelectorAll('th[data-sort]').forEach(th=>th.addEventListener('click',()=>{const key=th.dataset.sort;if(state.sortKey===key)state.sortDirection*=-1;else{state.sortKey=key;state.sortDirection=1;}applyFilters();}));
-  const refs=[['Workspace OAP overview and supported item types',report.references.overview],['OAP for interactive Power BI reports',report.references.reports],['OAP for paginated reports',report.references.paginatedReports],['Enable workspace OAP',report.references.setup]];
+    const refs=[['Workspace OAP overview and supported item types',report.references.overview],['OAP for interactive Power BI reports',report.references.reports],['OAP for paginated reports',report.references.paginatedReports],['Enable workspace OAP',report.references.setup],['Fabric security feature availability by item type',report.references.availability]];
   $('referenceLinks').innerHTML=refs.map(r=>`<li><a href="${esc(r[1])}" target="_blank" rel="noopener noreferrer">${esc(r[0])}</a></li>`).join('');
     renderReportBindings();renderChecks();applyFilters();
 }
